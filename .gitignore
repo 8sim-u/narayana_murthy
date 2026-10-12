@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# WAMSS vision model weights
+yolov8n.pt
+
