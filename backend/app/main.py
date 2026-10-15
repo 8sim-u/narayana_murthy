@@ -1,15 +1,196 @@
-from fastapi import FastAPI
+import logging
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import List, Optional
 
-from app.config import Settings
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
 
-settings = Settings()
+from app.config import settings
+from app.database import get_db, init_db
+from app.models import DetectionEvent
+from app.rules import RuleEngine
+from app.schemas import EventCreate, EventDetail, EventResponse
 
-app = FastAPI(title=settings.app_name)
+logger = logging.getLogger("wamss.api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+
+class AccessLogAndErrorHandlerMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.perf_counter()
+        client_ip = request.client.host if request.client else "unknown"
+        path = request.url.path
+
+        try:
+            response = await call_next(request)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(f"{request.method} {path} - {response.status_code} ({duration_ms:.2f}ms) [{client_ip}]")
+
+            if path == "/health/db" and response.status_code >= 500:
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"status": "error", "database": "unavailable"},
+                )
+            return response
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"{request.method} {path} failed ({duration_ms:.2f}ms): {type(exc).__name__}")
+            if path == "/health/db":
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"status": "error", "database": "unavailable"},
+                )
+            raise
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize database tables on application startup
+    init_db()
+    yield
+
+
+app = FastAPI(
+    title="WAMSS Backend API",
+    description="Workplace Activity Monitoring & Surveillance System event ingestion and query API",
+    version="0.2.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(AccessLogAndErrorHandlerMiddleware)
 
 
 @app.get("/health")
 def get_health():
+    """Simple service health check endpoint."""
     return {
-        "status": "ok",
+        "status": "online",
+        "service": "WAMSS backend",
         "environment": settings.environment,
     }
+
+
+@app.get("/health/db")
+def get_health_db(db: Session = Depends(get_db)):
+    """Database connectivity health check endpoint."""
+    try:
+        db.execute(text("SELECT 1"))
+        return {
+            "status": "ok",
+            "database": "connected",
+        }
+    except Exception:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "error",
+                "database": "unavailable",
+            },
+        )
+
+
+@app.post("/event", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
+def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
+    """
+    Ingests person detection events from the vision pipeline,
+    evaluates configurable decision rules, and persists event data.
+    """
+    # Evaluate configured decision rules
+    rule_result = RuleEngine.evaluate(zone=event_in.zone, objects=event_in.objects)
+
+    now_utc = datetime.now(timezone.utc)
+
+    db_event = DetectionEvent(
+        camera_id=event_in.camera_id,
+        track_id=event_in.track_id,
+        objects=event_in.objects,
+        confidence=event_in.confidence,
+        zone=event_in.zone,
+        decision=rule_result.decision,
+        alerts=rule_result.alerts,
+        timestamp=now_utc,
+    )
+
+    try:
+        db.add(db_event)
+        db.commit()
+        db.refresh(db_event)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error(f"Failed to persist detection event: {type(exc).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to store detection event",
+        )
+
+    return EventResponse(
+        received=True,
+        camera_id=db_event.camera_id,
+        alerts=rule_result.alerts,
+        decision=rule_result.decision,
+    )
+
+
+@app.get("/events", response_model=List[EventDetail])
+def list_events(
+    limit: int = Query(50, ge=1, le=1000, description="Maximum number of events to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    camera_id: Optional[str] = Query(None, description="Filter by camera ID"),
+    start_time: Optional[datetime] = Query(None, description="Filter events after or at this UTC datetime"),
+    end_time: Optional[datetime] = Query(None, description="Filter events before or at this UTC datetime"),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns detection events in reverse chronological order with optional filtering and pagination.
+    """
+    try:
+        query = db.query(DetectionEvent)
+
+        if camera_id is not None:
+            query = query.filter(DetectionEvent.camera_id == camera_id)
+        if start_time is not None:
+            query = query.filter(DetectionEvent.timestamp >= start_time)
+        if end_time is not None:
+            query = query.filter(DetectionEvent.timestamp <= end_time)
+
+        events = (
+            query.order_by(DetectionEvent.timestamp.desc(), DetectionEvent.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return events
+    except SQLAlchemyError as exc:
+        logger.error(f"Failed to query events: {type(exc).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to query detection events",
+        )
+
+
+@app.get("/events/{event_id}", response_model=EventDetail)
+def get_event(event_id: int, db: Session = Depends(get_db)):
+    """
+    Retrieves detailed information for a single detection event by its unique ID.
+    """
+    try:
+        event = db.query(DetectionEvent).filter(DetectionEvent.id == event_id).first()
+    except SQLAlchemyError as exc:
+        logger.error(f"Database query error for event {event_id}: {type(exc).__name__}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to fetch detection event",
+        )
+
+    if not event:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Event {event_id} not found",
+        )
+    return event
