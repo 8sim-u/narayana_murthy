@@ -222,3 +222,13 @@ __marimo__/
 # WAMSS vision model weights
 yolov8n.pt
 
+
+# Backend / database / frontend (brought in from backend/database-tests)
+.env.*
+!.env.example
+node_modules/
+*.sqlite
+*.db
+.DS_Store
+.idea/
+.vscode/
