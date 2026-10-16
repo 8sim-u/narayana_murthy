@@ -1,0 +1,15 @@
+# Vision pipeline dependencies for the edge node (Person A).
+#
+# These are intentionally NOT in backend/requirements.txt - the backend runs
+# headless on a server, while this pipeline runs on a machine with cameras.
+#
+# Install with:  pip install -r vision/requirements.txt
+#
+# NOTE: ultralytics pulls in torch and opencv-python as transitive dependencies,
+# so this install is several GB. It has NOT been verified against a live camera
+# feed yet - treat the constraints below as a starting point, not a lockfile.
+# The YOLO weights (yolov8n.pt) download automatically on first run.
+
+ultralytics>=8.4,<9
+opencv-python>=4.10,<6
+requests>=2.32,<3

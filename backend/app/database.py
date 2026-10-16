@@ -7,7 +7,18 @@ from app.models import Base
 
 logger = logging.getLogger(__name__)
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# SQLite (local development / test fallback) requires check_same_thread=False
+# because FastAPI may hand the session to a different thread than the one that
+# created it. PostgreSQL does not accept this argument, so only pass it for SQLite.
+_connect_args = {}
+if settings.database_url.startswith("sqlite"):
+    _connect_args = {"check_same_thread": False}
+
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    connect_args=_connect_args,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

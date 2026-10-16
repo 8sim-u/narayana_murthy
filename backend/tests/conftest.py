@@ -2,11 +2,11 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-# Ensure DATABASE_URL is available for test execution if not set in environment or .env
+# Ensure DATABASE_URL is available for test execution if not set in environment or .env.
+# Tests default to a throwaway SQLite database so the suite runs without PostgreSQL.
+# NEVER hardcode real credentials here - this file is committed to git.
 if not os.environ.get("DATABASE_URL"):
-    os.environ["DATABASE_URL"] = (
-        "postgresql+psycopg://surveillance_app:tmkbfjgagastya@localhost:5432/surveillance_dev"
-    )
+    os.environ["DATABASE_URL"] = "sqlite:///./test_wamss.db"
 
 from app.database import init_db
 from app.main import app

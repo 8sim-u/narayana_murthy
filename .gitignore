@@ -61,6 +61,13 @@ cover/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local agent / editor workspace data (not part of the project)
+.workbuddy-ai/
 
 # Flask stuff:
 instance/
