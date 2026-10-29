@@ -1,0 +1,31 @@
+# WAMSS policy configuration (example / template).
+# Copy to policy.yaml (or set WAMSS_POLICY_FILE to your own file) and tune.
+# ALL values here are placeholders. No real employee data.
+# Times are local time in the `timezone` below, formatted HH:MM (24-hour).
+
+# IANA timezone used to interpret clock times below.
+timezone: "UTC"
+
+# Working hours policy: activity outside this window is a violation.
+work_hours:
+  # No activity may start before this time.
+  no_work_before: "06:00"
+  # No activity may continue after this time.
+  no_work_after: "21:00"
+
+# Mandatory lunch break: inside the window there must be at least
+# min_break_minutes with no recorded activity (idle or no segments).
+lunch_break:
+  window_start: "12:30"
+  window_end: "13:30"
+  min_break_minutes: 30
+
+# Maximum continuous active work without a qualifying break (a gap of at
+# least break_reset_gap_minutes of idle time ends a continuous block).
+continuous_work:
+  max_continuous_minutes: 120
+  break_reset_gap_minutes: 15
+
+# Maximum total active minutes per calendar day.
+daily:
+  max_active_hours: 10

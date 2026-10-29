@@ -17,6 +17,17 @@ from app.models import DetectionEvent
 from app.rules import RuleEngine
 from app.schemas import EventCreate, EventDetail, EventResponse
 
+# Workstation activity / presence / focus / security / policy routers.
+# The model imports must run before init_db() so Base.metadata.create_all
+# creates the new tables.
+from app import activity_models  # noqa: F401 - registers ActivityLog
+from app import security_models  # noqa: F401 - registers SecurityEvent
+from app.activity import router as activity_router
+from app.focus import router as focus_router
+from app.presence import router as presence_router
+from app.security import router as security_router
+from app.policy import router as policy_router
+
 logger = logging.getLogger("wamss.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -64,6 +75,12 @@ app = FastAPI(
 )
 
 app.add_middleware(AccessLogAndErrorHandlerMiddleware)
+
+app.include_router(activity_router)
+app.include_router(focus_router)
+app.include_router(presence_router)
+app.include_router(security_router)
+app.include_router(policy_router)
 
 
 @app.get("/health")

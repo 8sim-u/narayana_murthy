@@ -1,0 +1,18 @@
+# WAMSS workstation activity agent dependencies.
+# Pinned for reproducible installs. Platform-conditional packages use
+# environment markers so a single file works on Windows and Linux.
+
+psutil==7.1.0
+requests==2.32.4
+pynput==1.8.1
+plyer==2.1.0
+pywin32==311; sys_platform == "win32"
+python-xlib==0.33; sys_platform == "linux"
+pytest==8.3.4
+
+# Optional smartwatch heart-rate via BLE (agent/wearable_ble.py).
+bleak==3.0.2
+
+# USB/DLP signal monitor (agent/usb_monitor.py). pywin32 (Windows) and psutil
+# are already listed above; pyudev is optional on Linux (polling fallback otherwise).
+pyudev==0.24.5; sys_platform == "linux"

@@ -5,11 +5,13 @@
 #
 # Install with:  pip install -r vision/requirements.txt
 #
-# NOTE: ultralytics pulls in torch and opencv-python as transitive dependencies,
-# so this install is several GB. It has NOT been verified against a live camera
-# feed yet - treat the constraints below as a starting point, not a lockfile.
+# NOTE: ultralytics also pulls torch and opencv-python transitively, so this
+# install is several GB even though they are listed explicitly. It has NOT
+# been verified against a live camera feed yet - treat the constraints below
+# as a starting point, not a lockfile.
 # The YOLO weights (yolov8n.pt) download automatically on first run.
 
 ultralytics>=8.4,<9
 opencv-python>=4.10,<6
+torch>=2.0,<3
 requests>=2.32,<3

@@ -1,4 +1,8 @@
-# Local Setup — Verified Working
+# Local Setup - Verified Working
+
+> **2026-10-30 re-verified on Linux** (Python 3.12.3): backend dependencies install
+> cleanly from `backend/requirements.txt` in a fresh venv, and the full pytest suite
+> passes (12 passed). The Windows steps below are unchanged.
 
 These are the exact steps that were run and verified on Windows (Python 3.13.14), 16 Oct 2026.
 The backend installs, tests green, and serves live traffic. No PostgreSQL required for local work.
@@ -15,7 +19,7 @@ cd "D:/NARAYN MURTY/backend"
 ```
 
 > If a package reports `Could not find a version ... (from versions: none)`, that is a transient
-> index error, not a bad pin. Re-run the install — every version in `requirements.txt` resolves.
+> index error, not a bad pin. Re-run the install - every version in `requirements.txt` resolves.
 
 ## 2. Database
 
@@ -47,7 +51,7 @@ cd "D:/NARAYN MURTY/backend"
 ```
 
 Tests default to a throwaway SQLite database. `tests/conftest.py` no longer contains a hardcoded
-credential — if `DATABASE_URL` is unset it falls back to `sqlite:///./test_wamss.db`.
+credential - if `DATABASE_URL` is unset it falls back to `sqlite:///./test_wamss.db`.
 
 ## 4. Run the API
 
@@ -71,7 +75,7 @@ curl "http://localhost:8000/events?limit=5"
 Expected: `REVIEW_REQUIRED` with `RESTRICTED_ZONE_DETECTED` for the restricted-zone event, and the
 row returned by `/events`.
 
-## 6. The vision half — NOT installed
+## 6. The vision half - NOT installed
 
 `vision/` requires `ultralytics`, `opencv-python`, `torch`, and `requests`. None of these are
 declared in any requirements file, and importing the modules from a clean install fails with
@@ -90,9 +94,9 @@ To reproduce it later, add a `vision/requirements.txt` and replace the hardcoded
 | File | Change |
 |---|---|
 | `backend/app/database.py` | SQLite support (`check_same_thread=False`); PostgreSQL path untouched |
-| `backend/.env` | Created (gitignored) — SQLite local-dev URL |
+| `backend/.env` | Created (gitignored) - SQLite local-dev URL |
 | `backend/tests/conftest.py` | Removed hardcoded DB credential; tests default to SQLite |
-| `docs/FUTURE_ROADMAP.html` | New — forward-looking assessment |
-| `docs/LOCAL_SETUP.md` | New — this file |
+| `docs/FUTURE_ROADMAP.html` | New - forward-looking assessment |
+| `docs/LOCAL_SETUP.md` | New - this file |
 
 No other source file was modified.
