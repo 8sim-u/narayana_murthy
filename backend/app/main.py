@@ -1,10 +1,12 @@
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -82,6 +84,19 @@ app.add_middleware(AccessLogAndErrorHandlerMiddleware)
 # API key auth: enabled only when WAMSS_API_KEY is set. Registered after the
 # access-log/error middleware so auth rejections go through the same pipeline.
 app.add_middleware(APIKeyAuthMiddleware)
+# CORS: the dashboard is served from a different origin (its own port or host)
+# than the API, so browsers need explicit permission. Origins are configurable
+# via WAMSS_CORS_ORIGINS (comma-separated); default allows all for local dev.
+# Registered last so it runs outermost and answers preflight requests before
+# the auth middleware sees them.
+_cors_origins = [o.strip() for o in os.environ.get("WAMSS_CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(activity_router)
 app.include_router(focus_router)
