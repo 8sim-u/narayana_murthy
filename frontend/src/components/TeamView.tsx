@@ -72,6 +72,15 @@ async function getJson<T>(path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Append office_id to a path when an office filter is active. Only used
+ *  with endpoints that support the filter (/activity, /presence,
+ *  /focus/daily, /security/alerts). */
+function withOffice(path: string, officeId: string): string {
+  if (!officeId) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}office_id=${encodeURIComponent(officeId)}`;
+}
+
 function asArray<T>(v: unknown): T[] {
   if (Array.isArray(v)) return v as T[];
   if (v && typeof v === 'object') {
@@ -132,7 +141,7 @@ function PanelMessage({ text, kind }: { text: string; kind: 'error' | 'muted' })
 }
 
 /** Average focus score across the team (GET /focus/daily per employee). */
-function FocusPanel({ employees }: { employees: string[] }) {
+function FocusPanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ avg: number; n: number }>>({
     status: 'idle', data: null, detail: null,
   });
@@ -151,7 +160,7 @@ function FocusPanel({ employees }: { employees: string[] }) {
         employees.map(async (id) => {
           try {
             const rows = asArray<FocusDailyRow>(
-              await getJson(`/focus/daily?employee_id=${encodeURIComponent(id)}`),
+              await getJson(withOffice(`/focus/daily?employee_id=${encodeURIComponent(id)}`, officeId)),
             );
             for (const r of rows) {
               const s = pickFocusScore(r);
@@ -177,7 +186,7 @@ function FocusPanel({ employees }: { employees: string[] }) {
     };
     void load();
     return () => { cancelled = true; };
-  }, [employees]);
+  }, [employees, officeId]);
 
   return (
     <PanelShell title="Team focus score" endpoint="GET /focus/daily?employee_id=...">
@@ -203,7 +212,7 @@ function FocusPanel({ employees }: { employees: string[] }) {
 }
 
 /** Strain distribution across the team (GET /activity/strain-summary, heuristic fallback). */
-function StrainPanel({ employees }: { employees: string[] }) {
+function StrainPanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ counts: Record<string, number>; heuristic: boolean }>>({
     status: 'idle', data: null, detail: null,
   });
@@ -248,7 +257,7 @@ function StrainPanel({ employees }: { employees: string[] }) {
         await Promise.all(
           employees.map(async (id) => {
             const items = asArray<ActivityItem>(
-              await getJson(`/activity?employee_id=${encodeURIComponent(id)}&limit=100`),
+              await getJson(withOffice(`/activity?employee_id=${encodeURIComponent(id)}&limit=100`, officeId)),
             );
             if (items.length === 0) return;
             const idle = items.filter((i) => i.is_idle).length / items.length;
@@ -275,7 +284,7 @@ function StrainPanel({ employees }: { employees: string[] }) {
     };
     void load();
     return () => { cancelled = true; };
-  }, [employees]);
+  }, [employees, officeId]);
 
   const counts = state.data?.counts;
   const total = counts ? counts.green + counts.amber + counts.red + counts.unknown : 0;
@@ -308,7 +317,7 @@ function StrainPanel({ employees }: { employees: string[] }) {
 }
 
 /** Break compliance % across the team (GET /focus/streaks per employee). */
-function BreakCompliancePanel({ employees }: { employees: string[] }) {
+function BreakCompliancePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ pct: number; compliant: number; n: number }>>({
     status: 'idle', data: null, detail: null,
   });
@@ -342,7 +351,7 @@ function BreakCompliancePanel({ employees }: { employees: string[] }) {
           }
           // Fallback: today's break_compliance dict inside /focus/daily.
           try {
-            const rows = asArray<StreakRow>(await getJson(`/focus/daily?employee_id=${q}`));
+            const rows = asArray<StreakRow>(await getJson(withOffice(`/focus/daily?employee_id=${q}`, officeId)));
             const latest = rows[rows.length - 1];
             const c = latest ? pickCompliant(latest) : null;
             if (c !== null) {
@@ -365,7 +374,7 @@ function BreakCompliancePanel({ employees }: { employees: string[] }) {
     };
     void load();
     return () => { cancelled = true; };
-  }, [employees]);
+  }, [employees, officeId]);
 
   return (
     <PanelShell title="Break compliance" endpoint="GET /focus/streaks?employee_id=... (fallback: /focus/daily)">
@@ -391,7 +400,7 @@ function BreakCompliancePanel({ employees }: { employees: string[] }) {
 }
 
 /** Team presence snapshot (GET /presence). */
-function PresencePanel({ employees }: { employees: string[] }) {
+function PresencePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ counts: Record<string, number>; list: { id: string; status: string }[] }>>({
     status: 'idle', data: null, detail: null,
   });
@@ -401,7 +410,7 @@ function PresencePanel({ employees }: { employees: string[] }) {
     const load = async () => {
       setState({ status: 'loading', data: null, detail: null });
       try {
-        const rows = asArray<PresenceRow>(await getJson('/presence'));
+        const rows = asArray<PresenceRow>(await getJson(withOffice('/presence', officeId)));
         const wanted = new Set(employees.map((e) => e.toLowerCase()));
         const counts: Record<string, number> = {};
         const list: { id: string; status: string }[] = [];
@@ -430,7 +439,7 @@ function PresencePanel({ employees }: { employees: string[] }) {
     };
     void load();
     return () => { cancelled = true; };
-  }, [employees]);
+  }, [employees, officeId]);
 
   return (
     <PanelShell title="Team presence" endpoint="GET /presence">
@@ -469,7 +478,7 @@ function PresencePanel({ employees }: { employees: string[] }) {
 
 // ---------------------------------------------------------------- view
 
-export default function TeamView() {
+export default function TeamView({ officeId = "" }: { officeId?: string }) {
   const [draft, setDraft] = useState(DEFAULT_EMPLOYEES.join(', '));
   const [employees, setEmployees] = useState<string[]>(DEFAULT_EMPLOYEES);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -507,10 +516,10 @@ export default function TeamView() {
       </div>
 
       <div key={refreshKey}>
-        <FocusPanel employees={employees} />
-        <StrainPanel employees={employees} />
-        <BreakCompliancePanel employees={employees} />
-        <PresencePanel employees={employees} />
+        <FocusPanel employees={employees} officeId={officeId} />
+        <StrainPanel employees={employees} officeId={officeId} />
+        <BreakCompliancePanel employees={employees} officeId={officeId} />
+        <PresencePanel employees={employees} officeId={officeId} />
       </div>
     </section>
   );

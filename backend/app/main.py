@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.database import get_db, init_db
+from app.auth import APIKeyAuthMiddleware
 from app.models import DetectionEvent
 from app.rules import RuleEngine
 from app.schemas import EventCreate, EventDetail, EventResponse
@@ -27,6 +28,8 @@ from app.focus import router as focus_router
 from app.presence import router as presence_router
 from app.security import router as security_router
 from app.policy import router as policy_router
+from app.exports import router as exports_router
+from app.analytics import router as analytics_router
 
 logger = logging.getLogger("wamss.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -75,12 +78,17 @@ app = FastAPI(
 )
 
 app.add_middleware(AccessLogAndErrorHandlerMiddleware)
+# API key auth: enabled only when WAMSS_API_KEY is set. Registered after the
+# access-log/error middleware so auth rejections go through the same pipeline.
+app.add_middleware(APIKeyAuthMiddleware)
 
 app.include_router(activity_router)
 app.include_router(focus_router)
 app.include_router(presence_router)
 app.include_router(security_router)
 app.include_router(policy_router)
+app.include_router(exports_router)
+app.include_router(analytics_router)
 
 
 @app.get("/health")

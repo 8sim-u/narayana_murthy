@@ -32,6 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.alerts import dispatch_alert
 from app.security_models import SecurityEvent
 
 logger = logging.getLogger("wamss.security")
@@ -57,6 +58,7 @@ class SecurityEventType(str, Enum):
 class SecurityEventIn(BaseModel):
     machine_id: str = Field(..., min_length=1, max_length=64)
     employee_id: str = Field(..., min_length=1, max_length=64)
+    office_id: str = Field("hq", max_length=64, description="Office / site the workstation belongs to")
     type: SecurityEventType
     # Detail payload is metadata only: device labels, byte counts, etc.
     # Never file content or keystroke content.
@@ -79,6 +81,7 @@ class AlertOut(BaseModel):
     reason: str
     machine_id: str
     employee_id: str
+    office_id: Optional[str] = None
     timestamp: datetime
     detail: Optional[Dict[str, Any]] = None
 
@@ -119,7 +122,8 @@ def flag_anomalies(
     Flag anomalous security events. Pure function: no I/O, no global state.
 
     Input events are mappings with keys: event_type (or "type"), timestamp,
-    machine_id, employee_id, detail (optional), id (optional).
+    machine_id, employee_id, office_id (optional), detail (optional),
+    id (optional).
 
     Rules (one alert per event, first matching rule wins):
       * any usb_insert / usb_remove            -> severity "high"
@@ -128,7 +132,7 @@ def flag_anomalies(
         falls outside the configured work-hours window -> severity "medium"
 
     Returns a list of alert dicts with keys: event_type, severity, reason,
-    machine_id, employee_id, timestamp, detail, id (when provided).
+    machine_id, employee_id, office_id, timestamp, detail, id (when provided).
     """
     try:
         start_h, end_h = _parse_work_hours(work_hours)
@@ -152,6 +156,7 @@ def flag_anomalies(
                     "reason": reason,
                     "machine_id": machine_id,
                     "employee_id": employee_id,
+                    "office_id": raw.get("office_id"),
                     "timestamp": ts,
                     "detail": detail if isinstance(detail, dict) else {"value": detail},
                     "id": raw.get("id"),
@@ -232,6 +237,7 @@ def ingest_security_events(batch: SecurityEventsBatch, db: Session = Depends(get
         SecurityEvent(
             machine_id=ev.machine_id,
             employee_id=ev.employee_id,
+            office_id=ev.office_id,
             event_type=ev.type.value,
             detail=ev.detail,
             timestamp=ev.timestamp,
@@ -241,6 +247,30 @@ def ingest_security_events(batch: SecurityEventsBatch, db: Session = Depends(get
     try:
         db.add_all(rows)
         db.commit()
+        flagged = flag_anomalies(
+            [
+                {
+                    "event_type": ev.type.value,
+                    "machine_id": ev.machine_id,
+                    "employee_id": ev.employee_id,
+                    "timestamp": ev.timestamp,
+                    "detail": ev.detail,
+                }
+                for ev in batch.events
+            ],
+            work_hours=_work_hours(),
+            tz_name=_tz_name(),
+            write_threshold_mb=_write_threshold_mb(),
+        )
+        for anomaly in flagged:
+            dispatch_alert(anomaly["event_type"], {
+                "machine_id": anomaly["machine_id"],
+                "employee_id": anomaly["employee_id"],
+                "severity": anomaly["severity"],
+                "reason": anomaly["reason"],
+                "timestamp": anomaly["timestamp"],
+                "detail": anomaly["detail"],
+            })
     except SQLAlchemyError as exc:
         db.rollback()
         logger.error("Failed to persist security events: %s", type(exc).__name__)
@@ -255,6 +285,7 @@ def ingest_security_events(batch: SecurityEventsBatch, db: Session = Depends(get
 def get_security_alerts(
     machine_id: Optional[str] = Query(None, description="Filter by machine ID"),
     employee_id: Optional[str] = Query(None, description="Filter by employee ID"),
+    office_id: Optional[str] = Query(None, description="Filter by office ID (e.g. hq, branch-north)"),
     hours: int = Query(24, ge=1, le=720, description="Lookback window in hours"),
     db: Session = Depends(get_db),
 ):
@@ -269,6 +300,8 @@ def get_security_alerts(
             query = query.filter(SecurityEvent.machine_id == machine_id)
         if employee_id:
             query = query.filter(SecurityEvent.employee_id == employee_id)
+        if office_id:
+            query = query.filter(SecurityEvent.office_id == office_id)
         events = (
             query.order_by(SecurityEvent.timestamp.desc(), SecurityEvent.id.desc()).limit(1000).all()
         )
@@ -285,6 +318,7 @@ def get_security_alerts(
             "event_type": ev.event_type,
             "machine_id": ev.machine_id,
             "employee_id": ev.employee_id,
+            "office_id": ev.office_id,
             "timestamp": ev.timestamp,
             "detail": ev.detail,
         }

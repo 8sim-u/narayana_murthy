@@ -73,8 +73,27 @@ def _getenv_float(name: str, default: float) -> float:
 
 
 SERVER_URL = os.environ.get("WAMSS_AGENT_SERVER_URL", "http://localhost:8000").rstrip("/")
+
+# Shared secret for the backend API key auth (docs/AUTH.md). Sent as the
+# X-API-Key header when set; when empty, auth stays disabled on the backend.
+API_KEY = os.environ.get("WAMSS_API_KEY", "")
+
+
+def _auth_headers():
+    """Headers for backend POSTs; includes X-API-Key only when configured."""
+    return {"X-API-Key": API_KEY} if API_KEY else None
 MACHINE_ID = os.environ.get("WAMSS_MACHINE_ID", socket.gethostname())
 EMPLOYEE_ID = os.environ.get("WAMSS_EMPLOYEE_ID", os.environ.get("USER", "unknown"))
+
+# ------------------------------------------------------------------
+# Agent 5 (multi-office, Round 3): office identity.
+# WAMSS_OFFICE_ID names the office/site this workstation belongs to
+# (e.g. "hq", "branch-north"). It is sent as office_id on every
+# activity record so the backend can filter dashboards by office.
+# A parallel Round 3 agent adds API-key headers in this file; this
+# block is self-contained and does not touch that work.
+# ------------------------------------------------------------------
+OFFICE_ID = os.environ.get("WAMSS_OFFICE_ID", "hq")
 LOG_INTERVAL = _getenv_float("WAMSS_LOG_INTERVAL", 60.0)          # seconds per activity segment
 SYNC_INTERVAL = _getenv_float("WAMSS_SYNC_INTERVAL", 300.0)       # seconds between upload attempts
 IDLE_AFTER_SEC = _getenv_float("WAMSS_IDLE_AFTER_SEC", 180.0)     # no input -> idle segment
@@ -312,6 +331,7 @@ class Syncer:
                 f"{self.server_url}/activity",
                 json={"records": batch},
                 timeout=15,
+                headers=_auth_headers(),
             )
             resp.raise_for_status()
             self.spool.mark_sent(len(batch))
@@ -420,6 +440,7 @@ class StrainTracker:
             "record_id": str(uuid.uuid4()),
             "machine_id": MACHINE_ID,
             "employee_id": EMPLOYEE_ID,
+            "office_id": OFFICE_ID,  # Agent 5 (multi-office, Round 3)
             "event_type": "break_suggested",
             "app_name": "wamss-agent",
             "window_title": f"break_suggested score={result.score} level={result.level}",
@@ -467,6 +488,7 @@ def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None) 
         "record_id": str(uuid.uuid4()),
         "machine_id": MACHINE_ID,
         "employee_id": EMPLOYEE_ID,
+        "office_id": OFFICE_ID,  # Agent 5 (multi-office, Round 3)
         "event_type": "activity",
         "app_name": app_name[:256],
         "window_title": window_title[:512],

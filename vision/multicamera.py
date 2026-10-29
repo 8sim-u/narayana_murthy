@@ -85,6 +85,15 @@ MODEL_PATH = os.environ.get("WAMSS_MODEL_PATH", "yolov8n.pt")
 # The real backend /event endpoint (NOT the deprecated standalone bridge).
 BACKEND_URL = os.environ.get("WAMSS_BACKEND_URL", "http://localhost:8000/event")
 
+# Shared secret for the backend API key auth (docs/AUTH.md). Sent as the
+# X-API-Key header when set; when empty, auth stays disabled on the backend.
+BACKEND_API_KEY = os.environ.get("WAMSS_API_KEY", "")
+
+
+def _backend_headers():
+    """Headers for backend POSTs; includes X-API-Key only when configured."""
+    return {"X-API-Key": BACKEND_API_KEY} if BACKEND_API_KEY else {}
+
 # Send detection events at most this often per camera, in seconds.
 EVENT_INTERVAL = _parse_float(os.environ.get("WAMSS_EVENT_INTERVAL"), 1.0)
 
@@ -157,6 +166,7 @@ def run_camera(camera_id, stream_url):
                         BACKEND_URL,
                         json=event,
                         timeout=2.0,
+                        headers=_backend_headers(),
                     )
                     response.raise_for_status()
 

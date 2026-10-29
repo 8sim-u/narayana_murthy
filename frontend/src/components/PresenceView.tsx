@@ -51,14 +51,15 @@ function formatTime(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? "-" : d.toLocaleString();
 }
 
-export default function PresenceView() {
+export default function PresenceView({ officeId = "" }: { officeId?: string }) {
   const [items, setItems] = useState<PresenceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/presence`);
+      const params = officeId ? `?office_id=${encodeURIComponent(officeId)}` : "";
+      const res = await fetch(`${API_URL}/presence${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: PresenceItem[] = await res.json();
       setItems(data);
@@ -68,7 +69,7 @@ export default function PresenceView() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [officeId]);
 
   useEffect(() => {
     void load();
@@ -118,20 +119,14 @@ export default function PresenceView() {
 
       {loading && <p>Loading...</p>}
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div className="presence-grid">
         {items.map((item) => {
           const color = STATE_COLORS[item.state] || "#9ca3af";
           return (
             <div
               key={item.machine_id}
-              style={{
-                border: `2px solid ${color}`,
-                borderRadius: 8,
-                padding: "12px 16px",
-                minWidth: 250,
-                maxWidth: 320,
-                background: "#fff",
-              }}
+              className="presence-card"
+              style={{ borderColor: color }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                 <span

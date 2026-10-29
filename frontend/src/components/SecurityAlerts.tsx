@@ -40,7 +40,7 @@ function formatDetail(detail: Record<string, unknown> | null): string {
   return "";
 }
 
-export default function SecurityAlerts() {
+export default function SecurityAlerts({ officeId = "" }: { officeId?: string }) {
   const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
   const [machineId, setMachineId] = useState("");
   const [employeeId, setEmployeeId] = useState("");
@@ -51,6 +51,7 @@ export default function SecurityAlerts() {
     const params = new URLSearchParams();
     if (machineId.trim()) params.set("machine_id", machineId.trim());
     if (employeeId.trim()) params.set("employee_id", employeeId.trim());
+    if (officeId) params.set("office_id", officeId);
     const url = `${API_URL}/security/alerts${params.toString() ? `?${params.toString()}` : ""}`;
     try {
       const res = await fetch(url);
@@ -65,7 +66,7 @@ export default function SecurityAlerts() {
     } finally {
       setLoading(false);
     }
-  }, [machineId, employeeId]);
+  }, [machineId, employeeId, officeId]);
 
   useEffect(() => {
     void load();

@@ -256,9 +256,10 @@ def _day_bounds(day: date):
     return start, start + timedelta(days=1)
 
 
-def _segments_for_day(db: Session, employee_id: str, day: date) -> List[Segment]:
+def _segments_for_day(db: Session, employee_id: str, day: date,
+                      office_id: Optional[str] = None) -> List[Segment]:
     start, end = _day_bounds(day)
-    rows = (
+    query = (
         db.query(ActivityLog)
         .filter(
             ActivityLog.employee_id == employee_id,
@@ -266,14 +267,16 @@ def _segments_for_day(db: Session, employee_id: str, day: date) -> List[Segment]
             ActivityLog.start_time >= start,
             ActivityLog.start_time < end,
         )
-        .order_by(ActivityLog.start_time)
-        .all()
     )
+    if office_id is not None:
+        query = query.filter(ActivityLog.office_id == office_id)
+    rows = query.order_by(ActivityLog.start_time).all()
     return [segment_from_activity_log(r) for r in rows]
 
 
-def daily_focus(db: Session, employee_id: str, day: date) -> dict:
-    segments = _segments_for_day(db, employee_id, day)
+def daily_focus(db: Session, employee_id: str, day: date,
+                office_id: Optional[str] = None) -> dict:
+    segments = _segments_for_day(db, employee_id, day, office_id)
     score = compute_focus_score(segments)
     breaks = break_compliance(segments)
     return {
@@ -340,6 +343,7 @@ def badges_for_streaks(focus_streak_days: int, break_streak_days: int) -> List[s
 def get_daily_focus(
     employee_id: str = Query(..., description="Employee ID (required)"),
     date_: Optional[date] = Query(None, alias="date", description="Date (YYYY-MM-DD); defaults to today"),
+    office_id: Optional[str] = Query(None, description="Filter to this office ID (e.g. hq, branch-north)"),
     db: Session = Depends(get_db),
 ):
     """Daily focus score for one employee, computed on the fly from ActivityLog rows."""
@@ -350,7 +354,7 @@ def get_daily_focus(
         )
     day = date_ or date.today()
     try:
-        return daily_focus(db, employee_id, day)
+        return daily_focus(db, employee_id, day, office_id)
     except SQLAlchemyError as exc:
         logger.error("failed to compute focus score for %s: %s", employee_id, type(exc).__name__)
         raise HTTPException(

@@ -11,11 +11,14 @@ import FocusWidget from './components/FocusWidget';
 import SecurityAlerts from './components/SecurityAlerts';
 import PolicyView from './components/PolicyView';
 import TeamView from './components/TeamView';
+import AnalyticsTab from './components/AnalyticsTab';
+import OfficeSelector from './components/OfficeSelector';
+import ExportButton from './components/ExportButton';
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_LIMIT = 100;
 
-type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team';
+type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics';
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'events', label: 'Vision Events' },
@@ -25,6 +28,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'security', label: 'Security' },
   { id: 'policy', label: 'Policy' },
   { id: 'team', label: 'Team' },
+  { id: 'analytics', label: 'Trends' },
 ];
 
 export default function App() {
@@ -33,6 +37,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cameraFilter, setCameraFilter] = useState('');
+  const [officeId, setOfficeId] = useState(''); // "" = all offices
 
   const loadEvents = useCallback(async () => {
     try {
@@ -67,6 +72,7 @@ export default function App() {
       <header className="app-header">
         <h1>WAMSS Dashboard</h1>
         <p className="muted">Workplace Activity Monitoring &amp; Surveillance System</p>
+        <OfficeSelector value={officeId} onChange={setOfficeId} />
       </header>
 
       <nav className="tab-bar" aria-label="Dashboard sections">
@@ -91,6 +97,12 @@ export default function App() {
               <div className="toolbar">
                 <h2>Events ({events.length})</h2>
                 <CameraFilter cameras={cameras} selected={cameraFilter} onChange={setCameraFilter} />
+                <ExportButton
+                  endpoint="/exports/events.csv"
+                  label="Export CSV"
+                  filters={{ camera_id: cameraFilter || undefined, limit: 1000 }}
+                  filename="events.csv"
+                />
               </div>
               {error && <p className="error">Could not load events: {error}</p>}
               <EventsTable events={events} loading={loading} />
@@ -100,12 +112,13 @@ export default function App() {
           </>
         )}
 
-        {tab === 'activity' && <EmployeeActivity />}
-        {tab === 'presence' && <PresenceView />}
-        {tab === 'focus' && <FocusWidget />}
-        {tab === 'security' && <SecurityAlerts />}
+        {tab === 'activity' && <EmployeeActivity officeId={officeId} />}
+        {tab === 'presence' && <PresenceView officeId={officeId} />}
+        {tab === 'focus' && <FocusWidget officeId={officeId} />}
+        {tab === 'security' && <SecurityAlerts officeId={officeId} />}
         {tab === 'policy' && <PolicyView />}
-        {tab === 'team' && <TeamView />}
+        {tab === 'team' && <TeamView officeId={officeId} />}
+        {tab === 'analytics' && <AnalyticsTab />}
       </main>
 
       <footer className="muted">

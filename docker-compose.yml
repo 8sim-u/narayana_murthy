@@ -1,0 +1,57 @@
+# WAMSS full stack: FastAPI backend + React dashboard.
+#
+# One-command deploy:
+#   cp .env.example .env   # then edit values
+#   docker compose up --build
+#
+# Backend:  http://localhost:8000  (API, /health for liveness)
+# Frontend: http://localhost:8080  (dashboard, served by nginx)
+#
+# With the optional Postgres profile:
+#   docker compose --profile postgres up --build
+# and set DATABASE_URL in .env to:
+#   postgresql+psycopg://wamss:changeme@postgres:5432/wamss
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/wamss.db}
+      WAMSS_API_KEY: ${WAMSS_API_KEY:-}
+    volumes:
+      - backend-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Optional production database. Gated behind the "postgres" profile so the
+  # default `docker compose up` stays dependency-free (SQLite).
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wamss}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-wamss}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  backend-data:
+  pgdata:

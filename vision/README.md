@@ -13,8 +13,6 @@ thresholds, and tracking parameters against a real feed.
 - `multicamera.py` - multi-camera tracker, the main entry point
 - `detection.py` - single-webcam detection demo
 - `tracking.py` - single-webcam ByteTrack demo
-- `bridge.py` - deprecated standalone bridge server; the pipeline now posts
-  directly to the real backend `/event` endpoint instead
 - `.env.example` - documented copy of every supported env var
 - `requirements.txt` - edge-node dependencies
 

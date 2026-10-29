@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import ExportButton from "./ExportButton";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:8000";
 
@@ -40,7 +41,7 @@ function minutesBetween(start: string, end: string): number {
   return Math.max(0, ms / 60000);
 }
 
-export default function EmployeeActivity() {
+export default function EmployeeActivity({ officeId = "" }: { officeId?: string }) {
   const [records, setRecords] = useState<ActivityRecord[]>([]);
   const [strain, setStrain] = useState<StrainSummary[]>([]);
   const [employeeId, setEmployeeId] = useState("");
@@ -56,6 +57,7 @@ export default function EmployeeActivity() {
       const params = new URLSearchParams();
       if (employeeId) params.set("employee_id", employeeId);
       if (machineId) params.set("machine_id", machineId);
+      if (officeId) params.set("office_id", officeId);
       params.set("limit", "500");
       const [actRes, strainRes] = await Promise.all([
         fetch(`${API_URL}/activity?${params.toString()}`),
@@ -77,7 +79,7 @@ export default function EmployeeActivity() {
     const t = setInterval(fetchData, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [officeId]);
 
   const activityRows = useMemo(
     () => records.filter((r) => r.event_type === "activity"),
@@ -122,6 +124,18 @@ export default function EmployeeActivity() {
   return (
     <div style={{ padding: 24, fontFamily: "system-ui, sans-serif", maxWidth: 1100 }}>
       <h2>Employee Workstation Activity</h2>
+      <div style={{ marginBottom: 12 }}>
+        <ExportButton
+          endpoint="/exports/activity.csv"
+          label="Export CSV"
+          filters={{
+            employee_id: employeeId || undefined,
+            machine_id: machineId || undefined,
+            limit: 1000,
+          }}
+          filename="activity.csv"
+        />
+      </div>
       <p style={{ color: "#555", fontSize: 13 }}>
         Strain level is a heuristic workload signal (green &lt; 40, amber 40-69, red &ge; 70).
         It is not a medical measure.
@@ -210,6 +224,7 @@ export default function EmployeeActivity() {
       {appUsage.length === 0 ? (
         <p style={{ color: "#888" }}>No active segments yet.</p>
       ) : (
+        <div className="table-wrap">
         <table style={{ borderCollapse: "collapse", width: "100%", marginBottom: 16 }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
@@ -226,6 +241,7 @@ export default function EmployeeActivity() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
 
       <h3>Idle stats</h3>
@@ -249,6 +265,7 @@ export default function EmployeeActivity() {
       )}
 
       <h3>Timeline (latest first)</h3>
+      <div className="table-wrap">
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
@@ -293,6 +310,7 @@ export default function EmployeeActivity() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

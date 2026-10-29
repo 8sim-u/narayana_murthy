@@ -270,8 +270,16 @@ class DigestFetchError(RuntimeError):
 
 
 def _get_json(url: str, timeout: float = 15.0):
-    """GET a JSON document from the API. Stdlib only (urllib)."""
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    """GET a JSON document from the API. Stdlib only (urllib).
+
+    Sends the WAMSS_API_KEY env var as the X-API-Key header when set, so the
+    digest works against backends with API key auth enabled (docs/AUTH.md).
+    """
+    headers = {"Accept": "application/json"}
+    api_key = os.environ.get("WAMSS_API_KEY", "")
+    if api_key:
+        headers["X-API-Key"] = api_key
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)

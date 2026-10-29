@@ -237,3 +237,187 @@ footer {
   border-color: #2563eb;
   color: #fff;
 }
+
+/* ---------- Round 3 (Agent 5): multi-office selector ---------- */
+.office-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+}
+.office-selector input {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 1rem;
+  max-width: 12rem;
+}
+
+/* ---------- Round 3 (Agent 5): security panel styles (were unstyled) ---------- */
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.panel-header h2 {
+  margin: 0;
+}
+.alert-count {
+  font-size: 0.9rem;
+  color: #666;
+}
+.filters {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0;
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.filters input {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+.alert-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.alert-item {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-left: 4px solid #999;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+.alert-badge {
+  flex: none;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-top: 0.1rem;
+}
+.alert-body {
+  min-width: 0;
+}
+.alert-reason {
+  margin: 0 0 0.2rem;
+  font-weight: 600;
+}
+.alert-meta {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #666;
+}
+.thresholds-note {
+  margin-top: 0.75rem;
+}
+
+/* ---------- Round 3 (Agent 5): presence cards ---------- */
+.presence-grid {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.presence-card {
+  border: 2px solid;
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: #fff;
+  flex: 1 1 250px;
+  max-width: 340px;
+  min-width: 0;
+}
+
+/* ---------- Round 3 (Agent 5): touch-friendly + responsive ---------- */
+button,
+.tab {
+  min-height: 44px;
+}
+input,
+select {
+  min-height: 44px;
+  font-size: 1rem; /* 16px avoids auto-zoom on mobile Safari */
+}
+.table-wrap {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 760px) {
+  .app {
+    padding: 0.75rem;
+  }
+  .app-header h1 {
+    font-size: 1.4rem;
+  }
+  .panel {
+    padding: 0.75rem;
+  }
+  .tab-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  .tab {
+    flex: 0 0 auto;
+  }
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .health-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  .test-form {
+    grid-template-columns: 1fr;
+  }
+  .test-form button {
+    width: 100%;
+  }
+  .filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .presence-card {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+  table {
+    font-size: 0.85rem;
+  }
+  th,
+  td {
+    padding: 0.45rem 0.5rem;
+  }
+  .office-selector {
+    width: 100%;
+  }
+  .office-selector input {
+    flex: 1;
+    max-width: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .alert-item {
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+}

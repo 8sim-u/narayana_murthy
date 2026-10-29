@@ -33,7 +33,7 @@ narayana-murthy-surveillance/
 
 - **Backend**: tests re-run 2026-10-30 on Linux, all passing (12 passed, the count already recorded in Quick Start step 4). Final numbers are being reconciled by the coordinator.
 - **Frontend / Dashboard**: React + TypeScript dashboard built with Vite (see `frontend/README.md`): backend health panel, live events table with polling, restricted-zone alert highlighting, camera filter, and a test-event form. Wired to the real backend API; the API base URL is configurable via `VITE_API_URL` (`frontend/.env.example`).
-- **Vision config**: camera stream URLs, bridge/backend host, model path, and event interval moved from hardcoded values to `WAMSS_*` environment variables; `cv2.imshow` is now headless-safe. Not yet verified against a live camera.
+- **Vision config**: camera stream URLs, backend host, model path, and event interval moved from hardcoded values to `WAMSS_*` environment variables; `cv2.imshow` is now headless-safe. Not yet verified against a live camera.
 - **Simulation harness**: still not started (`shared/` remains empty).
 - **Workstation activity module** (new 2026-10-30): a smartwatch-style always-on logger in `agent/` records active app/window/process, start/end timestamps, input counts (never keystroke content), idle periods, and a heuristic strain score, with local JSONL spooling and batched sync with backoff. Optional BLE smartwatch heart rate feeds the strain score. First-run consent gate, privacy exclusion list, USB/file-write DLP signals, break reminders with snooze. Backend gained `POST/GET /activity`, `GET /activity/strain-summary`, `GET /presence` (camera + workstation correlation), `GET /focus/daily`, `GET /focus/streaks` (focus score + gamification streaks), `POST /security/events`, `GET /security/alerts`, `GET /policy/rules`, `GET /policy/violations`, plus a weekly digest script (`backend/scripts/weekly_digest.py`). The dashboard has new tabs: Workstation Activity, Presence, Focus Score, Security, Policy, Team. Full pytest suite: 52 passed. See `agent/README.md` and `docs/COMPLETION_2026-10-30.md`.
 - **Employee notice and consent:** deployments of the workstation agent must include employee notice and consent per applicable workplace law before installing it on any workstation.
@@ -151,7 +151,7 @@ pip install -r vision/requirements.txt
 python vision/multicamera.py
 ```
 
-> **Not yet verified against a live camera.** Camera stream URLs, the bridge/backend host,
+> **Not yet verified against a live camera.** Camera stream URLs, the backend host,
 > model path, and timing are now read from `WAMSS_*` environment variables (see
 > `vision/.env.example`) and `cv2.imshow` is headless-safe, but the pipeline has never run
 > against real hardware. See [Known Gaps](#known-gaps) below.
@@ -178,11 +178,8 @@ highest-priority items:
    read the full detection history.
 3. **Rule 2 above is unimplemented.** No `source` field exists in the schema, model, or database,
    so simulated events cannot be distinguished from real detections.
-4. **`vision/bridge.py` duplicates the backend.** It re-implements `POST /event` with an
-   in-memory buffer capped at 1000 events, and the edge node points at it rather than at the
-   real backend. It should be removed in favour of a single ingestion path.
-5. **`shared/` is empty.** A dashboard now exists in `frontend/` (React + TypeScript, wired to the real backend API), but there is no simulation harness despite the project being described as simulation-first.
-6. **No migrations, CI, or containerisation.** Tables are created with `create_all`, so the first
+4. **`shared/` is empty.** A dashboard now exists in `frontend/` (React + TypeScript, wired to the real backend API), but there is no simulation harness despite the project being described as simulation-first.
+5. **No migrations, CI, or containerisation.** Tables are created with `create_all`, so the first
    schema change will be a manual deploy.
 
 ## Status (updated 2026-10-30)
@@ -192,4 +189,4 @@ highest-priority items:
 - Frontend dashboard built (React + TypeScript, Vite) and wired to the real backend API: health panel, live events table with polling, restricted-zone alert highlighting, camera filter, test-event form, plus tabs for Workstation Activity, Presence, Focus Score, Security, Policy, and Team.
 - Workstation activity module (`agent/`): smartwatch-style always-on logger with strain heuristic, break reminders, optional BLE heart rate, consent gate, privacy exclusion list, USB/file-write DLP signals. Backend: activity, presence, focus, security, policy routers, weekly digest script.
 - Simulation harness (`shared/`): not started.
-- Open items: no authentication, no migrations/CI, `vision/bridge.py` still duplicates the backend, DB credential rotation still owed, live-camera verification, BLE pairing and SMTP setup on a real machine, Windows WMI/USB paths untested on this Linux VM.
+- Open items: no authentication, no migrations/CI, DB credential rotation still owed, live-camera verification, BLE pairing and SMTP setup on a real machine, Windows WMI/USB paths untested on this Linux VM.

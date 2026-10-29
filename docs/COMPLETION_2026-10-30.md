@@ -9,7 +9,7 @@
   panel, a live events table with polling, restricted-zone alert highlighting, a camera
   filter, and a test-event form, all wired to the real backend API. The API base URL is
   configurable via `VITE_API_URL` (`frontend/.env.example`).
-- **Vision config hardened**: camera stream URLs, bridge/backend host, model path, and
+- **Vision config hardened**: camera stream URLs, backend host, model path, and
   event interval moved to `WAMSS_*` environment variables (no hardcoded addresses left in
   `vision/multicamera.py`); `cv2.imshow` is now headless-safe. Live-camera verification
   is still not done.
@@ -104,8 +104,9 @@ Full backend suite after round 2: **57 passed** (52 + 5 new digest tests).
   `.env.example` files).
 - Windows WMI/USB/pywin32 paths and real USB hardware events untested on
   Linux.
-- `vision/bridge.py` is deprecated in the README but kept; deleting it is
-  a product decision for the repo owner.
+- `vision/bridge.py` (the deprecated standalone bridge) was **deleted on 2026-10-30
+  (round 3)**. The vision pipeline posts directly to the real backend `/event` endpoint,
+  leaving a single ingestion path.
 
 ## Open items from round 1 (kept)
 
@@ -118,3 +119,44 @@ Full backend suite after round 2: **57 passed** (52 + 5 new digest tests).
   real machine setup (documented in `agent/README.md` and `.env.example` files).
 - Windows WMI/USB/pywin32 paths and real USB hardware events untested on Linux.
 - Weekly digest live-data fetcher (non-demo `--send` path) not yet wired.
+
+## Round 3 (2026-10-30): auth, Docker, alerts, analytics, multi-office
+
+Built by five parallel agents and merged in one push.
+
+- **API key auth**: `backend/app/auth.py` middleware accepts `X-API-Key`
+  from `WAMSS_API_KEY`; disabled with a startup warning when unset.
+  `/health`, `/health/db`, and docs paths are exempt. All clients updated
+  (`vision/multicamera.py`, `agent/activity_agent.py`, `shared/simulate.py`,
+  `weekly_digest.py`). Tests in `backend/tests/test_auth.py`. Design and key
+  distribution in `docs/AUTH.md`. Note: the browser dashboard cannot hold a
+  shared secret; serving the dashboard behind auth needs an API proxy
+  (follow-up).
+- **Cleanup**: `vision/bridge.py` deleted; all references removed from code
+  and docs.
+- **Docker**: `backend/Dockerfile`, `frontend/Dockerfile` (multi-stage +
+  nginx), `docker-compose.yml` (backend + frontend, optional postgres
+  profile), `.dockerignore` files, root `.env.example`. Deploy guide in
+  `docs/DEPLOY.md`; one-command `docker compose up --build`. Compose YAML
+  validated by parsing (no Docker daemon on the build machine).
+- **Real-time alerts**: `backend/app/alerts.py` dispatches on
+  `HIGH_STRAIN_DETECTED` and security anomalies via SMTP email, Telegram
+  bot, or a generic webhook (covers WhatsApp via provider). All channels
+  optional, failures logged not fatal. Tests mocked. Setup in
+  `docs/ALERTS.md`.
+- **Exports + analytics**: `GET /exports/events.csv|activity.csv|focus.csv`
+  (same filters as JSON endpoints), `GET /analytics/trends?metric=focus|strain&weeks=N`,
+  `backend/scripts/weekly_report_pdf.py` (fpdf2). Dashboard gained a Trends
+  tab and CSV Export buttons on Events and Activity. Docs in
+  `docs/ANALYTICS.md`.
+- **Multi-office + responsive**: `office_id` on activity and security
+  records (default "hq"), `office_id` filter on `/activity`, `/presence`,
+  `/focus/daily`, `/security/alerts`, dashboard office selector, responsive
+  CSS for mobile. Docs in `docs/MULTI_OFFICE.md`.
+
+## Open items after round 3
+
+- Live-camera verification, BLE pairing, SMTP credentials, zone-to-machine
+  mapping, Windows WMI/USB paths: need the user's real hardware (documented).
+- DB credential rotation still owed (no access to the credential store).
+- Dashboard-behind-auth needs an API proxy (recorded in `docs/AUTH.md`).

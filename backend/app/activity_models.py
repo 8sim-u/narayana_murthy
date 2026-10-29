@@ -21,6 +21,11 @@ class ActivityLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     machine_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     employee_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    # Office / site the workstation belongs to. server_default keeps older
+    # rows (written before this column existed) working as "hq".
+    office_id: Mapped[str] = mapped_column(
+        String(64), index=True, nullable=False, default="hq", server_default="hq"
+    )
     # "activity" for normal segments, "break_suggested" for break-reminder
     # events, "alert" for server-side rule alerts (e.g. HIGH_STRAIN_DETECTED).
     event_type: Mapped[str] = mapped_column(String(32), nullable=False, default="activity", index=True)

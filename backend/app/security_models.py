@@ -24,6 +24,11 @@ class SecurityEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     machine_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     employee_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    # Office / site the workstation belongs to. server_default keeps older
+    # rows (written before this column existed) working as "hq".
+    office_id: Mapped[str] = mapped_column(
+        String(64), index=True, nullable=False, default="hq", server_default="hq"
+    )
     # One of: usb_insert, usb_remove, file_write_burst, after_hours_activity
     event_type: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     # Free-form detail payload, e.g. {"device": "USB-8GB"} or

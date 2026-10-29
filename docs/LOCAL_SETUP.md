@@ -82,7 +82,7 @@ declared in any requirements file, and importing the modules from a clean instal
 `ModuleNotFoundError`. It was deliberately not installed here:
 
 - the models and runtime are several GB;
-- `multicamera.py` points at two hardcoded private-LAN phone streams and a hardcoded bridge host
+- `multicamera.py` points at two hardcoded private-LAN phone streams and a hardcoded backend host
   that are not reachable from this machine;
 - it opens GUI windows via `cv2.imshow`, which needs a desktop session.
 

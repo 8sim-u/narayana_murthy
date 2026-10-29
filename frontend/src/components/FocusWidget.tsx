@@ -62,7 +62,7 @@ function barColor(score: number): string {
   return '#e03131';
 }
 
-export default function FocusWidget() {
+export default function FocusWidget({ officeId = "" }: { officeId?: string }) {
   const [employees, setEmployees] = useState<string[]>([]);
   const [employeeId, setEmployeeId] = useState('');
   const [daily, setDaily] = useState<FocusDaily | null>(null);
@@ -73,7 +73,8 @@ export default function FocusWidget() {
 
   const loadEmployees = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/activity?limit=1000&offset=0`);
+      const officeParam = officeId ? `&office_id=${encodeURIComponent(officeId)}` : '';
+      const res = await fetch(`${API_URL}/activity?limit=1000&offset=0${officeParam}`);
       const records = await handleResponse<ActivityRecord[]>(res);
       const seen = new Set<string>();
       for (const r of records) {
@@ -85,15 +86,16 @@ export default function FocusWidget() {
     } catch {
       // Employee list is a convenience; the widget still works with manual entry.
     }
-  }, []);
+  }, [officeId]);
 
   const loadFocus = useCallback(
     async (id: string, showLoading: boolean) => {
       if (!id) return;
       if (showLoading) setLoading(true);
+      const officeParam = officeId ? `&office_id=${encodeURIComponent(officeId)}` : '';
       try {
         const dailyRes = await fetch(
-          `${API_URL}/focus/daily?employee_id=${encodeURIComponent(id)}`,
+          `${API_URL}/focus/daily?employee_id=${encodeURIComponent(id)}${officeParam}`,
         );
         const dailyData = await handleResponse<FocusDaily>(dailyRes);
 
@@ -106,7 +108,7 @@ export default function FocusWidget() {
           [...Array(7)].map((_, i) => {
             const d = isoDate(6 - i);
             return fetch(
-              `${API_URL}/focus/daily?employee_id=${encodeURIComponent(id)}&date=${d}`,
+              `${API_URL}/focus/daily?employee_id=${encodeURIComponent(id)}&date=${d}${officeParam}`,
             )
               .then((res) => handleResponse<FocusDaily>(res))
               .then((data) => ({ date: d, score: data.focus_score }))
@@ -124,7 +126,7 @@ export default function FocusWidget() {
         setLoading(false);
       }
     },
-    [],
+    [officeId],
   );
 
   const refresh = useCallback(() => {

@@ -27,7 +27,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -216,10 +216,16 @@ def _load_window_sec() -> int:
 # ---------------------------------------------------------------- endpoint
 
 @router.get("", response_model=List[PresenceStateOut])
-def get_presence(db: Session = Depends(get_db)):
+def get_presence(
+    office_id: Optional[str] = Query(None, description="Filter workstation activity to this office ID"),
+    db: Session = Depends(get_db),
+):
     """
     Per-workstation presence states: correlates recent person detections in
     each mapped camera zone with recent workstation activity on the machine.
+
+    When office_id is given, only that office's workstation activity logs are
+    used (camera/zone correlation itself is zone-map based and office-agnostic).
     """
     if ActivityLog is None:
         raise HTTPException(
@@ -239,9 +245,11 @@ def get_presence(db: Session = Depends(get_db)):
             .limit(5000)
             .all()
         )
+        activity_query = db.query(ActivityLog).filter(ActivityLog.end_time >= cutoff)
+        if office_id is not None:
+            activity_query = activity_query.filter(ActivityLog.office_id == office_id)
         activity_logs = (
-            db.query(ActivityLog)
-            .filter(ActivityLog.end_time >= cutoff)
+            activity_query
             .order_by(ActivityLog.end_time.desc())
             .limit(10000)
             .all()

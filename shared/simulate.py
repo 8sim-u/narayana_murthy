@@ -26,6 +26,10 @@ Usage:
     python3 shared/simulate.py --employees 10 --days 14 \\
         --api-url http://192.0.2.10:8000 --seed 42
 
+    # against a backend with API key auth enabled (docs/AUTH.md):
+    # the key comes from --api-key or the WAMSS_API_KEY environment variable
+    WAMSS_API_KEY=<your-deployment-key> python3 shared/simulate.py
+
 The backend must be running first (see docs/LOCAL_SETUP.md).
 """
 
@@ -33,11 +37,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+# Shared secret for the backend API key auth (docs/AUTH.md). May also be
+# passed with --api-key. Sent as the X-API-Key header when set.
+API_KEY = os.environ.get("WAMSS_API_KEY", "")
 
 APPS = [
     ("chrome.exe", "Google Chrome",
@@ -67,11 +76,15 @@ def iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def post_json(url: str, payload: dict, timeout: float = 15.0) -> dict:
+def post_json(url: str, payload: dict, timeout: float = 15.0,
+             api_key: str = "") -> dict:
     data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
     req = urllib.request.Request(
         url, data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -215,6 +228,9 @@ def parse_args(argv=None):
                    help="Print what would be posted without sending anything.")
     p.add_argument("--vision-per-day", type=int, default=40,
                    help="Vision events per day (default 40).")
+    p.add_argument("--api-key", default=None,
+                   help="Backend API key (or WAMSS_API_KEY env var). "
+                        "Sent as the X-API-Key header on every POST.")
     return p.parse_args(argv)
 
 
@@ -222,6 +238,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     rng = random.Random(args.seed)
     api = args.api_url.rstrip("/")
+    api_key = args.api_key or API_KEY
     now = datetime.now(timezone.utc)
     days = workdays(args.days, now)
 
@@ -235,7 +252,7 @@ def main(argv=None) -> int:
             for ev in gen_vision_events(rng, day, args.vision_per_day):
                 payload = {k: v for k, v in ev.items() if not k.startswith("_")}
                 if not args.dry_run:
-                    post_json(f"{api}/event", payload)
+                    post_json(f"{api}/event", payload, api_key=api_key)
                 vision_total += 1
         print(f"seeded vision: {len(days)} days x {args.vision_per_day} events",
               flush=True)
@@ -249,14 +266,14 @@ def main(argv=None) -> int:
                 for j in range(0, len(records), 100):
                     batch = {"records": records[j:j + 100]}
                     if not args.dry_run:
-                        post_json(f"{api}/activity", batch)
+                        post_json(f"{api}/activity", batch, api_key=api_key)
                     activity_total += len(batch["records"])
 
                 # security events
                 sec = gen_security(rng, eid, mid, day)
                 if sec:
                     if not args.dry_run:
-                        post_json(f"{api}/security/events", {"events": sec})
+                        post_json(f"{api}/security/events", {"events": sec}, api_key=api_key)
                     security_total += len(sec)
 
             print(f"seeded {eid} ({mid}): {len(days)} workdays", flush=True)

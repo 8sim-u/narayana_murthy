@@ -30,6 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.activity_models import ActivityLog
+from app.alerts import dispatch_alert
 from app.database import get_db
 
 logger = logging.getLogger("wamss.api.activity")
@@ -46,6 +47,7 @@ class ActivityRecordIn(BaseModel):
     record_id: Optional[str] = Field(None, description="Client-side idempotency id")
     machine_id: str = Field(..., max_length=64)
     employee_id: str = Field(..., max_length=64)
+    office_id: str = Field("hq", max_length=64, description="Office / site the workstation belongs to")
     event_type: str = Field("activity", max_length=32)
     app_name: str = Field("", max_length=256)
     window_title: str = Field("", max_length=512)
@@ -66,6 +68,7 @@ class ActivityRecordOut(BaseModel):
     id: int
     machine_id: str
     employee_id: str
+    office_id: str = "hq"
     event_type: str
     app_name: str
     window_title: str
@@ -120,11 +123,13 @@ def _check_strain_alert(db: Session, batch: List[ActivityRecordIn]) -> List[str]
     """
     alerts: List[str] = []
     peaks: Dict[Tuple[str, str], int] = {}
+    offices: Dict[Tuple[str, str], str] = {}
     for rec in batch:
         if rec.strain_score is None or rec.event_type != "activity":
             continue
         key = (rec.machine_id, rec.employee_id)
         peaks[key] = max(peaks.get(key, 0), rec.strain_score)
+        offices.setdefault(key, rec.office_id)
 
     for key, peak in peaks.items():
         if peak >= STRAIN_ALERT_THRESHOLD:
@@ -135,6 +140,7 @@ def _check_strain_alert(db: Session, batch: List[ActivityRecordIn]) -> List[str]
                 alert = ActivityLog(
                     machine_id=machine_id,
                     employee_id=employee_id,
+                    office_id=offices.get(key, "hq"),
                     event_type="alert",
                     app_name="wamss-agent",
                     window_title=f"HIGH_STRAIN_DETECTED score={peak} streak={streak}",
@@ -148,6 +154,13 @@ def _check_strain_alert(db: Session, batch: List[ActivityRecordIn]) -> List[str]
                 )
                 db.add(alert)
                 alerts.append("HIGH_STRAIN_DETECTED")
+                dispatch_alert("HIGH_STRAIN_DETECTED", {
+                    "machine_id": machine_id,
+                    "employee_id": employee_id,
+                    "strain_score": peak,
+                    "streak": streak,
+                    "severity": "high",
+                })
                 _strain_streaks[key] = 0  # reset so we do not spam one alert per batch
                 logger.warning("HIGH_STRAIN_DETECTED for %s/%s (peak=%d, streak=%d)",
                                machine_id, employee_id, peak, streak)
@@ -165,6 +178,7 @@ def ingest_activity(batch: ActivityBatchIn, db: Session = Depends(get_db)):
         ActivityLog(
             machine_id=r.machine_id,
             employee_id=r.employee_id,
+            office_id=r.office_id,
             event_type=r.event_type,
             app_name=r.app_name,
             window_title=r.window_title,
@@ -241,6 +255,7 @@ def strain_summary(db: Session = Depends(get_db)):
 def list_activity(
     machine_id: Optional[str] = Query(None, description="Filter by machine ID"),
     employee_id: Optional[str] = Query(None, description="Filter by employee ID"),
+    office_id: Optional[str] = Query(None, description="Filter by office ID (e.g. hq, branch-north)"),
     event_type: Optional[str] = Query(None, description="Filter by event type (activity, break_suggested, alert)"),
     start_time: Optional[datetime] = Query(None, description="Filter records at or after this UTC datetime"),
     end_time: Optional[datetime] = Query(None, description="Filter records at or before this UTC datetime"),
@@ -255,6 +270,8 @@ def list_activity(
             query = query.filter(ActivityLog.machine_id == machine_id)
         if employee_id is not None:
             query = query.filter(ActivityLog.employee_id == employee_id)
+        if office_id is not None:
+            query = query.filter(ActivityLog.office_id == office_id)
         if event_type is not None:
             query = query.filter(ActivityLog.event_type == event_type)
         if start_time is not None:
