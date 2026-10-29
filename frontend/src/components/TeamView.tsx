@@ -1,14 +1,19 @@
-// TeamView.tsx (Agent K) - team-level dashboard view for WAMSS.
+// TeamView - team-level dashboard view for WAMSS.
 //
 // Aggregates team metrics from the sibling routers (activity, focus,
 // presence). Every panel fetches independently and degrades to a graceful
 // "no data / endpoint unavailable" state if its endpoint is missing, so one
 // failed panel never breaks the others.
 //
-// Self-contained: imports React only. Uses VITE_API_URL (or localhost:8000)
-// and VITE_TEAM_EMPLOYEES (comma-separated default employee ids) from env,
-// plus a text field for ad-hoc employee lists.
+// Uses VITE_API_URL (or localhost:8000) and VITE_TEAM_EMPLOYEES
+// (comma-separated default employee ids) from env, plus a text field for
+// ad-hoc employee lists.
 import { useCallback, useEffect, useState } from 'react';
+import { ArrowClockwise } from '@phosphor-icons/react';
+import {
+  Chip, Dot, EmptyState, ErrorNotice, Field, Meter, Reveal,
+  SectionHead, SkeletonRows, Stat,
+} from './ui';
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000';
 
@@ -128,16 +133,17 @@ const DEFAULT_EMPLOYEES = parseEmployees(
 
 function PanelShell(props: { title: string; endpoint: string; children: React.ReactNode }) {
   return (
-    <section className="panel">
-      <h2>{props.title}</h2>
-      <p className="muted">Source: {props.endpoint}</p>
+    <section className="panel" aria-label={props.title}>
+      <SectionHead title={props.title} meta={props.endpoint} />
       {props.children}
     </section>
   );
 }
 
-function PanelMessage({ text, kind }: { text: string; kind: 'error' | 'muted' }) {
-  return <p className={kind}>{text}</p>;
+function scoreColor(score: number): string {
+  if (score >= 70) return 'var(--ok)';
+  if (score >= 40) return 'var(--warn)';
+  return 'var(--bad)';
 }
 
 /** Average focus score across the team (GET /focus/daily per employee). */
@@ -189,29 +195,28 @@ function FocusPanel({ employees, officeId }: { employees: string[]; officeId: st
   }, [employees, officeId]);
 
   return (
-    <PanelShell title="Team focus score" endpoint="GET /focus/daily?employee_id=...">
-      {state.status === 'loading' && <PanelMessage text="Loading focus scores..." kind="muted" />}
+    <PanelShell title="Team Focus Score" endpoint="GET /focus/daily?employee_id=...">
+      {state.status === 'loading' && <SkeletonRows rows={2} height={56} />}
       {state.status === 'ready' && state.data && (
-        <div className="health-row">
-          <div className="health-item">
-            <span className="health-label">Average focus score</span>
-            <span className="health-value">{state.data.avg.toFixed(1)}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}>
+          <Stat label="Average focus" value={state.data.avg.toFixed(1)} tone={scoreColor(state.data.avg)} />
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <Meter value={state.data.avg} color={scoreColor(state.data.avg)} label={`Team average focus ${state.data.avg.toFixed(1)}`} />
           </div>
-          <div className="health-item">
-            <span className="health-label">Samples</span>
-            <span className="health-value">{state.data.n}</span>
-          </div>
+          <Stat label="Samples" value={state.data.n} mono />
         </div>
       )}
-      {state.status === 'empty' && <PanelMessage text={`No focus data: ${state.detail ?? 'nothing to show'}.`} kind="muted" />}
+      {state.status === 'empty' && (
+        <EmptyState title="No focus data" body={state.detail ?? 'Select employees to aggregate their focus scores.'} />
+      )}
       {state.status === 'unavailable' && (
-        <PanelMessage text={`Endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} kind="error" />
+        <ErrorNotice message={`Focus endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} />
       )}
     </PanelShell>
   );
 }
 
-/** Strain distribution across the team (GET /activity/strain-summary, heuristic fallback). */
+/** Strain Distribution across the team (GET /activity/strain-summary, heuristic fallback). */
 function StrainPanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ counts: Record<string, number>; heuristic: boolean }>>({
     status: 'idle', data: null, detail: null,
@@ -290,33 +295,49 @@ function StrainPanel({ employees, officeId }: { employees: string[]; officeId: s
   const total = counts ? counts.green + counts.amber + counts.red + counts.unknown : 0;
 
   return (
-    <PanelShell title="Strain distribution" endpoint="GET /activity/strain-summary (fallback: /activity idle ratio)">
-      {state.status === 'loading' && <PanelMessage text="Loading strain data..." kind="muted" />}
+    <PanelShell title="Strain Distribution" endpoint="GET /activity/strain-summary (fallback: /activity idle ratio)">
+      {state.status === 'loading' && <SkeletonRows rows={2} height={52} />}
       {state.status === 'ready' && counts && (
         <>
           {state.data?.heuristic && (
-            <p className="muted">
-              Heuristic estimate from idle-time ratios, not real strain scores. Treat as approximate.
-            </p>
+            <div className="notice notice-warn" role="note">
+              <p>Heuristic estimate from idle-time ratios, not real strain scores. Treat as approximate.</p>
+            </div>
           )}
-          <div className="health-row">
-            <div className="health-item"><span className="dot ok" /><span className="health-label">Green</span><span className="health-value">{counts.green}</span></div>
-            <div className="health-item"><span className="health-label">Amber</span><span className="health-value">{counts.amber}</span></div>
-            <div className="health-item"><span className="dot down" /><span className="health-label">Red</span><span className="health-value">{counts.red}</span></div>
-            <div className="health-item"><span className="health-label">Unknown</span><span className="health-value">{counts.unknown}</span></div>
-            <div className="health-item"><span className="health-label">Employees</span><span className="health-value">{total}</span></div>
+          <div className="grid-4">
+            <div className="stat">
+              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Dot tone="ok" /> {counts.green}
+              </div>
+              <div className="stat-label">Green</div>
+            </div>
+            <div className="stat">
+              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Dot tone="warn" /> {counts.amber}
+              </div>
+              <div className="stat-label">Amber</div>
+            </div>
+            <div className="stat">
+              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Dot tone="bad" /> {counts.red}
+              </div>
+              <div className="stat-label">Red</div>
+            </div>
+            <Stat label="Employees" value={total} mono />
           </div>
         </>
       )}
-      {state.status === 'empty' && <PanelMessage text={`No strain data: ${state.detail ?? 'nothing to show'}.`} kind="muted" />}
+      {state.status === 'empty' && (
+        <EmptyState title="No strain data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
+      )}
       {state.status === 'unavailable' && (
-        <PanelMessage text={`Endpoints unavailable: ${state.detail}. Tried /activity/strain-summary and /activity.`} kind="error" />
+        <ErrorNotice message={`Endpoints unavailable: ${state.detail}. Tried /activity/strain-summary and /activity.`} />
       )}
     </PanelShell>
   );
 }
 
-/** Break compliance % across the team (GET /focus/streaks per employee). */
+/** Break Compliance % across the team (GET /focus/streaks per employee). */
 function BreakCompliancePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ pct: number; compliant: number; n: number }>>({
     status: 'idle', data: null, detail: null,
@@ -377,29 +398,28 @@ function BreakCompliancePanel({ employees, officeId }: { employees: string[]; of
   }, [employees, officeId]);
 
   return (
-    <PanelShell title="Break compliance" endpoint="GET /focus/streaks?employee_id=... (fallback: /focus/daily)">
-      {state.status === 'loading' && <PanelMessage text="Loading streak data..." kind="muted" />}
+    <PanelShell title="Break Compliance" endpoint="GET /focus/streaks?employee_id=... (fallback: /focus/daily)">
+      {state.status === 'loading' && <SkeletonRows rows={2} height={56} />}
       {state.status === 'ready' && state.data && (
-        <div className="health-row">
-          <div className="health-item">
-            <span className="health-label">Break compliant</span>
-            <span className="health-value">{state.data.pct.toFixed(1)}%</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}>
+          <Stat label="Break compliant" value={`${state.data.pct.toFixed(0)}%`} tone={state.data.pct >= 70 ? 'var(--ok)' : 'var(--warn)'} />
+          <div style={{ flex: 1, minWidth: 160 }}>
+            <Meter value={state.data.pct} color={state.data.pct >= 70 ? 'var(--ok)' : 'var(--warn)'} label={`Break Compliance ${state.data.pct.toFixed(1)} percent`} />
           </div>
-          <div className="health-item">
-            <span className="health-label">Compliant employees</span>
-            <span className="health-value">{state.data.compliant} of {state.data.n}</span>
-          </div>
+          <Stat label="Compliant" value={`${state.data.compliant} of ${state.data.n}`} mono />
         </div>
       )}
-      {state.status === 'empty' && <PanelMessage text={`No streak data: ${state.detail ?? 'nothing to show'}.`} kind="muted" />}
+      {state.status === 'empty' && (
+        <EmptyState title="No streak data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
+      )}
       {state.status === 'unavailable' && (
-        <PanelMessage text={`Endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} kind="error" />
+        <ErrorNotice message={`Focus endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} />
       )}
     </PanelShell>
   );
 }
 
-/** Team presence snapshot (GET /presence). */
+/** Team Presence snapshot (GET /presence). */
 function PresencePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
   const [state, setState] = useState<PanelState<{ counts: Record<string, number>; list: { id: string; status: string }[] }>>({
     status: 'idle', data: null, detail: null,
@@ -442,35 +462,31 @@ function PresencePanel({ employees, officeId }: { employees: string[]; officeId:
   }, [employees, officeId]);
 
   return (
-    <PanelShell title="Team presence" endpoint="GET /presence">
-      {state.status === 'loading' && <PanelMessage text="Loading presence..." kind="muted" />}
+    <PanelShell title="Team Presence" endpoint="GET /presence">
+      {state.status === 'loading' && <SkeletonRows rows={3} height={44} />}
       {state.status === 'ready' && state.data && (
-        <>
-          <div className="health-row">
-            {Object.entries(state.data.counts).map(([s, c]) => (
-              <div className="health-item" key={s}>
-                <span className="health-label">{s}</span>
-                <span className="health-value">{c}</span>
-              </div>
-            ))}
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Employee</th><th>Status</th></tr>
-              </thead>
-              <tbody>
-                {state.data.list.map((r) => (
-                  <tr key={r.id}><td>{r.id}</td><td>{r.status}</td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+        <div className="table-wrap" style={{ border: 0 }}>
+          <table className="ledger">
+            <tbody>
+              {state.data.list.map((r) => (
+                <tr key={r.id}>
+                  <td className="id">{r.id}</td>
+                  <td style={{ textAlign: 'right' }}>
+                    <Chip tone={r.status.includes('active') && !r.status.includes('absent') ? 'ok' : r.status.includes('absent') ? 'bad' : 'idle'}>
+                      {r.status}
+                    </Chip>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
-      {state.status === 'empty' && <PanelMessage text={`No presence data: ${state.detail ?? 'nothing to show'}.`} kind="muted" />}
+      {state.status === 'empty' && (
+        <EmptyState title="No presence data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
+      )}
       {state.status === 'unavailable' && (
-        <PanelMessage text={`Endpoint unavailable: ${state.detail}. This panel needs the /presence router.`} kind="error" />
+        <ErrorNotice message={`Presence endpoint unavailable: ${state.detail}. This panel needs the /presence router.`} />
       )}
     </PanelShell>
   );
@@ -489,38 +505,44 @@ export default function TeamView({ officeId = "" }: { officeId?: string }) {
   }, [draft]);
 
   return (
-    <section>
-      <header className="app-header">
-        <h1>Team view</h1>
-        <p className="muted">Aggregates focus, strain, break compliance and presence per employee.</p>
-      </header>
-
-      <div className="panel">
-        <div className="toolbar">
-          <label htmlFor="team-employees">Employee ids (comma-separated)</label>
-          <input
-            id="team-employees"
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="E001, E002, E003"
-            style={{ minWidth: '16rem' }}
-          />
-          <button type="button" onClick={apply}>Load team</button>
-          <button type="button" onClick={() => setRefreshKey((k) => k + 1)}>Refresh</button>
-        </div>
-        <p className="muted">
-          Defaults come from VITE_TEAM_EMPLOYEES. Each panel below is independent; if a
-          backend endpoint is missing, only that panel reports it.
-        </p>
-      </div>
+    <div className="rise">
+      <Reveal>
+        <section className="panel" aria-label="Team selection">
+          <div className="section-head">
+            <h2 className="section-title">Team Roster</h2>
+            <div className="form-row" style={{ marginLeft: 'auto' }}>
+              <Field label="Employee IDs">
+                <input
+                  className="input"
+                  id="team-employees"
+                  type="text"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder="E001, E002, E003"
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ minWidth: '16rem', fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                />
+              </Field>
+              <button type="button" className="btn btn-primary" onClick={apply}>Load Team</button>
+              <button type="button" className="btn" onClick={() => setRefreshKey((k) => k + 1)}>
+                <ArrowClockwise size={15} weight="bold" aria-hidden="true" /> Refresh
+              </button>
+            </div>
+          </div>
+          <p style={{ color: 'var(--text-2)', fontSize: 13, margin: 0 }}>
+            Defaults come from VITE_TEAM_EMPLOYEES. Each panel below is independent; if a
+            backend endpoint is missing, only that panel reports it.
+          </p>
+        </section>
+      </Reveal>
 
       <div key={refreshKey}>
-        <FocusPanel employees={employees} officeId={officeId} />
-        <StrainPanel employees={employees} officeId={officeId} />
-        <BreakCompliancePanel employees={employees} officeId={officeId} />
-        <PresencePanel employees={employees} officeId={officeId} />
+        <Reveal><FocusPanel employees={employees} officeId={officeId} /></Reveal>
+        <Reveal><StrainPanel employees={employees} officeId={officeId} /></Reveal>
+        <Reveal><BreakCompliancePanel employees={employees} officeId={officeId} /></Reveal>
+        <Reveal><PresencePanel employees={employees} officeId={officeId} /></Reveal>
       </div>
-    </section>
+    </div>
   );
 }

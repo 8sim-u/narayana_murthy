@@ -1,3 +1,5 @@
+import { Field } from './ui';
+
 interface CameraFilterProps {
   cameras: string[];
   selected: string;
@@ -6,9 +8,13 @@ interface CameraFilterProps {
 
 export default function CameraFilter({ cameras, selected, onChange }: CameraFilterProps) {
   return (
-    <label className="camera-filter">
-      Camera
-      <select value={selected} onChange={(e) => onChange(e.target.value)}>
+    <Field label="Camera">
+      <select
+        className="select"
+        value={selected}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label="Filter events by camera"
+      >
         <option value="">All cameras</option>
         {cameras.map((c) => (
           <option key={c} value={c}>
@@ -16,6 +22,6 @@ export default function CameraFilter({ cameras, selected, onChange }: CameraFilt
           </option>
         ))}
       </select>
-    </label>
+    </Field>
   );
 }

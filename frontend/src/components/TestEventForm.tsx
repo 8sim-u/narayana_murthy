@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { sendEvent } from '../api';
 import type { EventResponse } from '../types';
+import { Chip, Field, SectionHead, Reveal } from './ui';
 
 const ZONES = ['RESTRICTED', 'ENTRY', 'WORKSPACE', 'UNKNOWN'];
 
@@ -46,56 +47,71 @@ export default function TestEventForm({ onSent }: { onSent: () => void }) {
   };
 
   return (
-    <section className="panel">
-      <h2>Send test event</h2>
-      <form onSubmit={handleSubmit} className="test-form">
-        <label>
-          Camera ID
-          <input value={cameraId} onChange={(e) => setCameraId(e.target.value)} required />
-        </label>
-        <label>
-          Track ID
-          <input
-            value={trackId}
-            onChange={(e) => setTrackId(e.target.value)}
-            placeholder="auto-generated if empty"
-          />
-        </label>
-        <label>
-          Objects (comma separated)
-          <input value={objects} onChange={(e) => setObjects(e.target.value)} required />
-        </label>
-        <label>
-          Confidence (0.0 - 1.0)
-          <input
-            value={confidence}
-            onChange={(e) => setConfidence(e.target.value)}
-            inputMode="decimal"
-            required
-          />
-        </label>
-        <label>
-          Zone
-          <select value={zone} onChange={(e) => setZone(e.target.value)}>
-            {ZONES.map((z) => (
-              <option key={z} value={z}>
-                {z}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit" disabled={sending}>
-          {sending ? 'Sending...' : 'Send event'}
-        </button>
-      </form>
-      {error && <p className="error">{error}</p>}
-      {result && (
-        <div className={`result ${isAlertResult(result) ? 'alert-box' : 'ok-box'}`}>
-          <strong>Decision: {result.decision}</strong>
-          <div>Camera: {result.camera_id}</div>
-          <div>Alerts: {result.alerts.length > 0 ? result.alerts.join(', ') : 'none'}</div>
-        </div>
-      )}
-    </section>
+    <Reveal>
+      <section className="panel" aria-label="Send test event">
+        <SectionHead
+          title="Signal Injector"
+          meta="POST /event"
+        />
+        <form onSubmit={handleSubmit}>
+          <div className="form-row">
+            <Field label="Camera ID">
+              <input className="input" value={cameraId} onChange={(e) => setCameraId(e.target.value)} required autoComplete="off" spellCheck={false} />
+            </Field>
+            <Field label="Track ID">
+              <input
+                className="input"
+                value={trackId}
+                onChange={(e) => setTrackId(e.target.value)}
+                placeholder="auto-generated if empty"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </Field>
+            <Field label="Objects">
+              <input className="input" value={objects} onChange={(e) => setObjects(e.target.value)} required placeholder="person, bag" autoComplete="off" spellCheck={false} />
+            </Field>
+            <Field label="Confidence">
+              <input
+                className="input"
+                value={confidence}
+                onChange={(e) => setConfidence(e.target.value)}
+                inputMode="decimal"
+                required
+                style={{ width: 110 }}
+              />
+            </Field>
+            <Field label="Zone">
+              <select className="select" value={zone} onChange={(e) => setZone(e.target.value)}>
+                {ZONES.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <button type="submit" className="btn btn-primary" disabled={sending}>
+              {sending ? 'Sending…' : 'Send Event'}
+            </button>
+          </div>
+        </form>
+        {error && (
+          <div className="notice notice-error rise" role="alert" style={{ marginTop: 14 }}>
+            <p>{error}</p>
+          </div>
+        )}
+        {result && (
+          <div className={`notice ${isAlertResult(result) ? 'notice-warn' : 'notice-info'} rise`} style={{ marginTop: 14 }} role="status">
+            <p>
+              <strong>Decision: {result.decision}</strong>
+              {' '}Camera {result.camera_id}. Alerts: {result.alerts.length > 0 ? result.alerts.join(', ') : 'none'}.
+            </p>
+            <Chip tone={isAlertResult(result) ? 'warn' : 'ok'}>
+              {isAlertResult(result) ? 'REVIEW' : 'CLEAR'}
+            </Chip>
+          </div>
+        )}
+      </section>
+    </Reveal>
   );
 }

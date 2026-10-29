@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import {
+  Chip, EmptyState, ErrorNotice, Field, Reveal,
+  SectionHead, SkeletonRows,
+} from "./ui";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:8000";
 
@@ -15,20 +19,17 @@ interface SecurityAlert {
 
 const REFRESH_MS = 15000;
 
-function severityStyle(eventType: string, severity: string): { background: string; color: string } {
+function eventTone(eventType: string, severity: string): "bad" | "warn" | "idle" {
   // USB insert/remove: red. After-hours: amber. Write bursts: orange.
-  if (eventType === "usb_insert" || eventType === "usb_remove") {
-    return { background: "#fde8e8", color: "#b42318" };
-  }
-  if (eventType === "after_hours_activity") {
-    return { background: "#fef6e0", color: "#935705" };
-  }
-  if (eventType === "file_write_burst") {
-    return { background: "#fff1e6", color: "#b54708" };
-  }
-  return severity === "high"
-    ? { background: "#fde8e8", color: "#b42318" }
-    : { background: "#fef6e0", color: "#935705" };
+  if (eventType === "usb_insert" || eventType === "usb_remove") return "bad";
+  if (eventType === "after_hours_activity") return "warn";
+  if (eventType === "file_write_burst") return "warn";
+  return severity === "high" ? "bad" : "warn";
+}
+
+function railClass(eventType: string, severity: string): string {
+  const t = eventTone(eventType, severity);
+  return t === "bad" ? "alert-rail-bad" : t === "warn" ? "alert-rail-warn" : "alert-rail-idle";
 }
 
 function formatDetail(detail: Record<string, unknown> | null): string {
@@ -79,68 +80,89 @@ export default function SecurityAlerts({ officeId = "" }: { officeId?: string })
   const highCount = alerts.filter((a) => a.event_type === "usb_insert" || a.event_type === "usb_remove").length;
 
   return (
-    <section className="panel" aria-label="Security alerts">
-      <div className="panel-header">
-        <h2>Security Alerts</h2>
-        <span className="alert-count">
-          {alerts.length} alert{alerts.length === 1 ? "" : "s"}
-          {highCount > 0 ? ` (${highCount} USB)` : ""}
-        </span>
-      </div>
-
-      <div className="filters">
-        <label>
-          Machine
-          <input
-            type="text"
-            value={machineId}
-            onChange={(e) => setMachineId(e.target.value)}
-            placeholder="e.g. WS-1042"
-          />
-        </label>
-        <label>
-          Employee
-          <input
-            type="text"
-            value={employeeId}
-            onChange={(e) => setEmployeeId(e.target.value)}
-            placeholder="e.g. EMP-007"
-          />
-        </label>
-      </div>
-
-      {loading && <p className="muted">Loading alerts...</p>}
-      {error && <p className="error">{error}</p>}
-      {!loading && !error && alerts.length === 0 && (
-        <p className="muted">No security anomalies in the current window.</p>
-      )}
-
-      <ul className="alert-list">
-        {alerts.map((a, i) => {
-          const style = severityStyle(a.event_type, a.severity);
-          return (
-            <li key={a.id ?? `${a.timestamp}-${i}`} className="alert-item" style={{ borderLeftColor: style.color }}>
-              <span className="alert-badge" style={{ background: style.background, color: style.color }}>
-                {a.event_type.replace(/_/g, " ").toUpperCase()}
-              </span>
-              <div className="alert-body">
-                <p className="alert-reason">{a.reason}</p>
-                <p className="alert-meta">
-                  {a.machine_id} &middot; {a.employee_id} &middot;{" "}
-                  {new Date(a.timestamp).toLocaleString()} {formatDetail(a.detail)}
-                </p>
+    <div className="rise">
+      <Reveal>
+        <section className="panel" aria-label="Security alerts">
+          <SectionHead
+            title="Anomaly Feed"
+            meta={`${alerts.length} alert${alerts.length === 1 ? "" : "s"}${highCount > 0 ? ` · ${highCount} USB` : ""} · refresh ${REFRESH_MS / 1000}s`}
+            actions={
+              <div className="form-row">
+                <Field label="Machine">
+                  <input
+                    className="input"
+                    type="text"
+                    value={machineId}
+                    onChange={(e) => setMachineId(e.target.value)}
+                    placeholder="e.g. WS-1042"
+                    autoComplete="off"
+                    spellCheck={false}
+                    style={{ width: 150 }}
+                  />
+                </Field>
+                <Field label="Employee">
+                  <input
+                    className="input"
+                    type="text"
+                    value={employeeId}
+                    onChange={(e) => setEmployeeId(e.target.value)}
+                    placeholder="e.g. EMP-007"
+                    autoComplete="off"
+                    spellCheck={false}
+                    style={{ width: 150 }}
+                  />
+                </Field>
               </div>
-            </li>
-          );
-        })}
-      </ul>
+            }
+          />
 
-      <p className="muted thresholds-note">
-        Signals: USB insert/remove (always flagged), after-hours activity (outside
-        WAMSS_WORK_HOURS), and file write bursts above WAMSS_DLP_WRITE_THRESHOLD_MB
-        per interval. Workstation agents report byte counts only; no file or keystroke
-        content is ever captured. Refreshes every 15s.
-      </p>
-    </section>
+          {error && (
+            <ErrorNotice
+              message={`Could not load security alerts: ${error}`}
+              onRetry={() => { void load(); }}
+            />
+          )}
+
+          {loading && alerts.length === 0 ? (
+            <SkeletonRows rows={4} height={72} />
+          ) : alerts.length === 0 && !error ? (
+            <EmptyState
+              title="No security anomalies"
+              body="The feed is quiet. USB events, after-hours activity and write bursts will surface here."
+            />
+          ) : (
+            <ul className="alert-feed">
+              {alerts.map((a, i) => (
+                <li
+                  key={a.id ?? `${a.timestamp}-${i}`}
+                  className={`alert-row-card ${railClass(a.event_type, a.severity)} rise-stagger`}
+                  style={{ "--i": Math.min(i, 16) } as React.CSSProperties}
+                >
+                  <Chip tone={eventTone(a.event_type, a.severity)}>
+                    {a.event_type.replace(/_/g, " ").toUpperCase()}
+                  </Chip>
+                  <div className="alert-row-body">
+                    <p className="alert-row-reason">{a.reason}</p>
+                    <p className="alert-row-meta">
+                      <span className="id">{a.machine_id}</span> &middot;{' '}
+                      <span className="id">{a.employee_id}</span> &middot;{' '}
+                      {new Date(a.timestamp).toLocaleString()}
+                      {formatDetail(a.detail) ? ` · ${formatDetail(a.detail)}` : ""}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <p style={{ color: "var(--text-2)", fontSize: 13, margin: "16px 0 0", maxWidth: "80ch" }}>
+            Signals: USB insert/remove (always flagged), after-hours activity (outside
+            WAMSS_WORK_HOURS), and file write bursts above WAMSS_DLP_WRITE_THRESHOLD_MB
+            per interval. Workstation agents report byte counts only; no file or keystroke
+            content is ever captured.
+          </p>
+        </section>
+      </Reveal>
+    </div>
   );
 }

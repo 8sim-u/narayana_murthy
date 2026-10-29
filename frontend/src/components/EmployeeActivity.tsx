@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { ArrowClockwise } from "@phosphor-icons/react";
 import ExportButton from "./ExportButton";
+import {
+  Chip, Dot, EmptyState, ErrorNotice, Field, Meter, Reveal,
+  SectionHead, SkeletonRows, Stat, strainDot,
+} from "./ui";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:8000";
 
@@ -32,22 +37,21 @@ interface StrainSummary {
 }
 
 const STRAIN_COLORS: Record<string, string> = {
-  green: "#2e9e44",
-  amber: "#d97706",
-  red: "#dc2626",
-  unknown: "#9ca3af",
+  green: "var(--ok)",
+  amber: "var(--warn)",
+  red: "var(--bad)",
+  unknown: "var(--text-3)",
 };
 
-// Distinct badge colors for the activity-events feed on the timeline.
-const EVENT_BADGE: Record<string, { bg: string; fg: string }> = {
-  activity: { bg: "#e0f2fe", fg: "#0369a1" },
-  alert: { bg: "#fee2e2", fg: "#dc2626" },
-  break_suggested: { bg: "#fef3c7", fg: "#d97706" },
-  fatigue_suspected: { bg: "#ede9fe", fg: "#7c3aed" },
+const EVENT_TONE: Record<string, "signal" | "bad" | "warn" | "iris" | "idle"> = {
+  activity: "signal",
+  alert: "bad",
+  break_suggested: "warn",
+  fatigue_suspected: "iris",
 };
 
-function eventBadge(type: string) {
-  return EVENT_BADGE[type] ?? { bg: "#f3f4f6", fg: "#6b7280" };
+function eventTone(type: string) {
+  return EVENT_TONE[type] ?? "idle";
 }
 
 function minutesBetween(start: string, end: string): number {
@@ -81,16 +85,16 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
       if (!strainRes.ok) throw new Error(`strain-summary: HTTP ${strainRes.status}`);
       setRecords(await actRes.json());
       setStrain(await strainRes.json());
-    } catch (e: any) {
-      setError(e?.message || "Failed to load activity data");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load activity data");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
-    const t = setInterval(fetchData, 60000);
+    void fetchData();
+    const t = setInterval(() => { void fetchData(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [officeId]);
@@ -109,6 +113,8 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
     }
     return [...map.entries()].sort((a, b) => b[1] - a[1]);
   }, [activityRows]);
+
+  const maxAppMin = appUsage.length > 0 ? appUsage[0][1] : 1;
 
   const idleStats = useMemo(() => {
     let idleMin = 0;
@@ -141,244 +147,205 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
   const timelineRows = useMemo(() => records.slice(0, 100), [records]);
 
   return (
-    <div style={{ padding: 24, fontFamily: "system-ui, sans-serif", maxWidth: 1100 }}>
-      <h2>Employee Workstation Activity</h2>
-      <div style={{ marginBottom: 12 }}>
-        <ExportButton
-          endpoint="/exports/activity.csv"
-          label="Export CSV"
-          filters={{
-            employee_id: employeeId || undefined,
-            machine_id: machineId || undefined,
-            limit: 1000,
-          }}
-          filename="activity.csv"
-        />
-      </div>
-      <p style={{ color: "#555", fontSize: 13 }}>
-        Strain level is a heuristic workload signal (green &lt; 40, amber 40-69, red &ge; 70).
-        It is not a medical measure. ML stress is an experimental model score shown when the
-        backend provides it.
-      </p>
-
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <label>
-          Employee ID{" "}
-          <input value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} placeholder="all" />
-        </label>
-        <label>
-          Machine ID{" "}
-          <input value={machineId} onChange={(e) => setMachineId(e.target.value)} placeholder="all" />
-        </label>
-        <label>
-          Idle alert threshold (min){" "}
-          <input
-            type="number"
-            min={1}
-            value={idleThresholdMin}
-            onChange={(e) => setIdleThresholdMin(Number(e.target.value) || 15)}
-            style={{ width: 70 }}
-          />
-        </label>
-        <button onClick={fetchData}>Refresh</button>
-      </div>
+    <div className="rise">
+      <section className="panel" aria-label="Activity filters">
+        <div className="section-head">
+          <h2 className="section-title">Telemetry Filters</h2>
+          <div className="form-row" style={{ marginLeft: "auto" }}>
+            <ExportButton
+              endpoint="/exports/activity.csv"
+              label="Export CSV"
+              filters={{
+                employee_id: employeeId || undefined,
+                machine_id: machineId || undefined,
+                limit: 1000,
+              }}
+              filename="activity.csv"
+            />
+            <button type="button" className="btn" onClick={() => { void fetchData(); }}>
+              <ArrowClockwise size={15} weight="bold" aria-hidden="true" /> Refresh
+            </button>
+          </div>
+        </div>
+        <div className="form-row">
+          <Field label="Employee ID">
+            <input className="input" value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} placeholder="all" autoComplete="off" spellCheck={false} />
+          </Field>
+          <Field label="Machine ID">
+            <input className="input" value={machineId} onChange={(e) => setMachineId(e.target.value)} placeholder="all" autoComplete="off" spellCheck={false} />
+          </Field>
+          <Field label="Idle alert threshold (min)">
+            <input
+              className="input"
+              type="number"
+              min={1}
+              value={idleThresholdMin}
+              onChange={(e) => setIdleThresholdMin(Number(e.target.value) || 15)}
+              style={{ width: 90 }}
+            />
+          </Field>
+        </div>
+        <p style={{ color: "var(--text-2)", fontSize: 13, margin: "14px 0 0", maxWidth: "80ch" }}>
+          Strain level is a heuristic workload signal (green &lt; 40, amber 40-69, red &ge; 70).
+          It is not a medical measure. ML stress is an experimental model score shown when the
+          backend provides it.
+        </p>
+      </section>
 
       {error && (
-        <div style={{ background: "#fee2e2", padding: 12, borderRadius: 6, marginBottom: 16 }}>
-          Error: {error}
-        </div>
+        <ErrorNotice
+          message={`Could not load activity data: ${error}`}
+          onRetry={() => { void fetchData(); }}
+        />
       )}
 
       {idleAlerts.length > 0 && (
-        <div
-          style={{
-            background: "#fef3c7",
-            border: "1px solid #d97706",
-            padding: 12,
-            borderRadius: 6,
-            marginBottom: 16,
-          }}
-        >
-          <strong>Idle alert:</strong> {idleAlerts.length} machine(s) idle past {idleThresholdMin} min:{" "}
-          {idleAlerts.map((s) => `${s.employee_id}@${s.machine_id}`).join(", ")}
+        <div className="notice notice-warn rise" role="alert">
+          <p>
+            <strong>Idle alert:</strong> {idleAlerts.length} machine(s) idle past {idleThresholdMin} min:{' '}
+            {idleAlerts.map((s) => `${s.employee_id}@${s.machine_id}`).join(", ")}
+          </p>
         </div>
       )}
 
-      {loading && <p>Loading...</p>}
+      <Reveal>
+        <section className="panel" aria-label="Strain per Machine">
+          <SectionHead title="Strain per Machine" meta={`${strain.length} machines`} />
+          {loading && strain.length === 0 ? (
+            <SkeletonRows rows={3} height={56} />
+          ) : strain.length === 0 ? (
+            <EmptyState title="No strain data" body="Strain summaries appear here once workstation agents start reporting." />
+          ) : (
+            <ul className="spec-list">
+              {strain.map((s, i) => {
+                const color = STRAIN_COLORS[(s.strain_level || "unknown").toLowerCase()] ?? "var(--text-3)";
+                return (
+                  <li key={`${s.machine_id}/${s.employee_id}`} className="rise-stagger" style={{ "--i": Math.min(i, 12) } as React.CSSProperties}>
+                    <span className="spec-term" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Dot tone={strainDot(s.strain_level)} />
+                      <span className="id" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
+                        {s.employee_id}@{s.machine_id}
+                      </span>
+                    </span>
+                    <span style={{ flex: 1, minWidth: 140 }}>
+                      <Meter value={s.strain_score ?? 0} color={color} label={`Strain ${s.strain_score ?? "unknown"}`} />
+                    </span>
+                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
+                      {s.strain_score ?? "-"} / {s.strain_level}
+                    </span>
+                    <Chip tone="iris">ML {s.ml_stress_score ?? "-"}</Chip>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      </Reveal>
 
-      <h3>Strain level per machine</h3>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
-        {strain.map((s) => (
-          <div
-            key={`${s.machine_id}/${s.employee_id}`}
-            style={{
-              border: "1px solid #ddd",
-              borderRadius: 6,
-              padding: "8px 12px",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <span
-              style={{
-                width: 12,
-                height: 12,
-                borderRadius: "50%",
-                background: STRAIN_COLORS[s.strain_level] || "#9ca3af",
-                display: "inline-block",
-              }}
-            />
-            <span>
-              {s.employee_id}@{s.machine_id}
-            </span>
-            <span style={{ color: "#666", fontSize: 12 }}>
-              strain {s.strain_score ?? "-"} ({s.strain_level})
-            </span>
-            <span style={{ color: "#666", fontSize: 12 }}>
-              ML stress {(s.ml_stress_score ?? null) ?? "-"}
-            </span>
-          </div>
-        ))}
-        {strain.length === 0 && !loading && <span style={{ color: "#888" }}>No data yet.</span>}
+      <div className="grid-2">
+        <Reveal>
+          <section className="panel" aria-label="App Usage">
+            <SectionHead title="App Usage" meta="active minutes" />
+            {loading && appUsage.length === 0 ? (
+              <SkeletonRows rows={4} height={40} />
+            ) : appUsage.length === 0 ? (
+              <EmptyState title="No active segments" body="App Usage builds up as agents report non-idle windows." />
+            ) : (
+              <ul className="spec-list">
+                {appUsage.slice(0, 8).map(([app, mins], i) => (
+                  <li key={app} className="rise-stagger" style={{ "--i": Math.min(i, 8) } as React.CSSProperties}>
+                    <span className="spec-term" style={{ minWidth: 150 }}>{app}</span>
+                    <span style={{ flex: 1, minWidth: 120 }}>
+                      <Meter value={mins} max={maxAppMin} color="var(--ice)" label={`${app} ${mins.toFixed(1)} minutes`} />
+                    </span>
+                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{mins.toFixed(1)} min</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </Reveal>
+
+        <Reveal>
+          <section className="panel" aria-label="Idle stats">
+            <SectionHead title="Time Split" />
+            <div className="grid-2">
+              <Stat label="Active" value={`${idleStats.activeMin.toFixed(0)} min`} mono />
+              <Stat label="Idle" value={`${idleStats.idleMin.toFixed(0)} min`} mono tone="var(--text-2)" />
+            </div>
+            {alerts.length > 0 && (
+              <>
+                <hr className="divider" />
+                <h3 className="section-title" style={{ marginBottom: 10, fontSize: 15 }}>Break Reminders and Alerts</h3>
+                <ul className="spec-list">
+                  {alerts.slice(0, 6).map((a) => (
+                    <li key={a.id}>
+                      <Chip tone={eventTone(a.event_type)}>{a.event_type}</Chip>
+                      <span className="spec-def">
+                        {a.employee_id}@{a.machine_id} &middot; {new Date(a.start_time).toLocaleString()}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        </Reveal>
       </div>
 
-      <h3>App usage breakdown</h3>
-      {appUsage.length === 0 ? (
-        <p style={{ color: "#888" }}>No active segments yet.</p>
-      ) : (
-        <div className="table-wrap">
-        <table style={{ borderCollapse: "collapse", width: "100%", marginBottom: 16 }}>
-          <thead>
-            <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
-              <th style={{ padding: 6 }}>Application</th>
-              <th style={{ padding: 6 }}>Minutes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {appUsage.map(([app, mins]) => (
-              <tr key={app} style={{ borderBottom: "1px solid #eee" }}>
-                <td style={{ padding: 6 }}>{app}</td>
-                <td style={{ padding: 6 }}>{mins.toFixed(1)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        </div>
-      )}
-
-      <h3>Idle stats</h3>
-      <p>
-        Active: <strong>{idleStats.activeMin.toFixed(1)} min</strong> | Idle:{" "}
-        <strong>{idleStats.idleMin.toFixed(1)} min</strong>
-      </p>
-
-      {alerts.length > 0 && (
-        <>
-          <h3>Break reminders &amp; alerts</h3>
-          <ul>
-            {alerts.map((a) => {
-              const b = eventBadge(a.event_type);
-              return (
-                <li key={a.id}>
-                  <span
-                    style={{
-                      display: "inline-block",
-                      background: b.bg,
-                      color: b.fg,
-                      borderRadius: 4,
-                      padding: "1px 8px",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      marginRight: 6,
-                    }}
-                  >
-                    {a.event_type}
-                  </span>
-                  {a.employee_id}@{a.machine_id} - {a.window_title} (
-                  {new Date(a.start_time).toLocaleString()})
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
-      <h3>Timeline (latest first)</h3>
-      <div className="table-wrap">
-      <table style={{ borderCollapse: "collapse", width: "100%" }}>
-        <thead>
-          <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
-            <th style={{ padding: 6 }}>Time</th>
-            <th style={{ padding: 6 }}>Type</th>
-            <th style={{ padding: 6 }}>Employee</th>
-            <th style={{ padding: 6 }}>Machine</th>
-            <th style={{ padding: 6 }}>App</th>
-            <th style={{ padding: 6 }}>Window</th>
-            <th style={{ padding: 6 }}>Keys</th>
-            <th style={{ padding: 6 }}>Clicks</th>
-            <th style={{ padding: 6 }}>Idle</th>
-            <th style={{ padding: 6 }}>Strain</th>
-          </tr>
-        </thead>
-        <tbody>
-          {timelineRows.map((r) => {
-            const isEvent = r.event_type !== "activity";
-            const b = eventBadge(r.event_type);
-            return (
-              <tr
-                key={r.id}
-                style={{
-                  borderBottom: "1px solid #eee",
-                  background: isEvent ? b.bg : undefined,
-                }}
-              >
-                <td style={{ padding: 6, fontSize: 12 }}>{new Date(r.start_time).toLocaleString()}</td>
-                <td style={{ padding: 6 }}>
-                  <span
-                    style={{
-                      display: "inline-block",
-                      background: b.bg,
-                      color: b.fg,
-                      border: `1px solid ${b.fg}`,
-                      borderRadius: 4,
-                      padding: "1px 8px",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {r.event_type}
-                  </span>
-                </td>
-                <td style={{ padding: 6 }}>{r.employee_id}</td>
-                <td style={{ padding: 6 }}>{r.machine_id}</td>
-                <td style={{ padding: 6 }}>{isEvent ? "-" : r.app_name}</td>
-                <td style={{ padding: 6, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {r.window_title}
-                </td>
-                <td style={{ padding: 6 }}>{isEvent ? "-" : r.keystrokes}</td>
-                <td style={{ padding: 6 }}>{isEvent ? "-" : r.mouse_clicks}</td>
-                <td style={{ padding: 6 }}>{r.is_idle ? "yes" : "no"}</td>
-                <td style={{ padding: 6 }}>
-                  <span
-                    style={{
-                      display: "inline-block",
-                      width: 10,
-                      height: 10,
-                      borderRadius: "50%",
-                      background: STRAIN_COLORS[r.strain_level || "unknown"],
-                      marginRight: 4,
-                    }}
-                  />
-                  {r.strain_score ?? "-"}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      </div>
+      <Reveal>
+        <section className="panel" aria-label="Activity timeline">
+          <SectionHead title="Timeline" meta="latest first, 100 rows" />
+          {loading && timelineRows.length === 0 ? (
+            <SkeletonRows rows={6} height={48} />
+          ) : timelineRows.length === 0 ? (
+            <EmptyState title="No timeline rows" body="Activity records will list here once agents report in." />
+          ) : (
+            <div className="table-wrap">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Employee</th>
+                    <th>Machine</th>
+                    <th>App</th>
+                    <th>Window</th>
+                    <th>Keys</th>
+                    <th>Clicks</th>
+                    <th>Idle</th>
+                    <th>Strain</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {timelineRows.map((r) => {
+                    const isEvent = r.event_type !== "activity";
+                    return (
+                      <tr key={r.id} className={isEvent ? "row-alert" : undefined}>
+                        <td className="num">{new Date(r.start_time).toLocaleString()}</td>
+                        <td><Chip tone={eventTone(r.event_type)}>{r.event_type}</Chip></td>
+                        <td className="id">{r.employee_id}</td>
+                        <td className="id">{r.machine_id}</td>
+                        <td>{isEvent ? "-" : r.app_name}</td>
+                        <td style={{ maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.window_title}</td>
+                        <td className="num">{isEvent ? "-" : r.keystrokes}</td>
+                        <td className="num">{isEvent ? "-" : r.mouse_clicks}</td>
+                        <td>{r.is_idle ? "yes" : "no"}</td>
+                        <td>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                            <Dot tone={strainDot(r.strain_level)} />
+                            <span className="num">{r.strain_score ?? "-"}</span>
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </Reveal>
     </div>
   );
 }

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
+import {
+  Chip, Dot, EmptyState, ErrorNotice, Reveal, SectionHead,
+  SkeletonCards, Stat, formatClock,
+} from "./ui";
 
-const API_URL = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
+const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:8000";
 
 type PresenceState =
   | "PRESENT_AND_ACTIVE"
@@ -23,17 +27,17 @@ interface PresenceItem {
 
 const REFRESH_MS = 10000;
 
-const STATE_COLORS: Record<PresenceState, string> = {
-  PRESENT_AND_ACTIVE: "#2e9e44",
-  PRESENT_BUT_IDLE: "#d97706",
-  ACTIVE_BUT_ABSENT: "#dc2626",
-  ABSENT: "#9ca3af",
+const STATE_TONE: Record<PresenceState, "ok" | "warn" | "bad" | "idle"> = {
+  PRESENT_AND_ACTIVE: "ok",
+  PRESENT_BUT_IDLE: "warn",
+  ACTIVE_BUT_ABSENT: "bad",
+  ABSENT: "idle",
 };
 
 const STATE_LABELS: Record<PresenceState, string> = {
   PRESENT_AND_ACTIVE: "Present and active",
   PRESENT_BUT_IDLE: "Present but idle",
-  ACTIVE_BUT_ABSENT: "Active but absent (anomaly)",
+  ACTIVE_BUT_ABSENT: "Active but absent",
   ABSENT: "Absent",
 };
 
@@ -44,12 +48,6 @@ const STATE_DESCRIPTIONS: Record<PresenceState, string> = {
     "Workstation shows input but nobody is seen in the camera zone. Possible unattended remote session.",
   ABSENT: "Nobody seen in the camera zone and no workstation activity.",
 };
-
-function formatTime(iso: string | null): string {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "-" : d.toLocaleString();
-}
 
 export default function PresenceView({ officeId = "" }: { officeId?: string }) {
   const [items, setItems] = useState<PresenceItem[]>([]);
@@ -64,8 +62,8 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
       const data: PresenceItem[] = await res.json();
       setItems(data);
       setError(null);
-    } catch (e: any) {
-      setError(e?.message || "Failed to load presence data");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load presence data");
     } finally {
       setLoading(false);
     }
@@ -73,109 +71,97 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
 
   useEffect(() => {
     void load();
-    const t = window.setInterval(load, REFRESH_MS);
+    const t = window.setInterval(() => { void load(); }, REFRESH_MS);
     return () => window.clearInterval(t);
   }, [load]);
 
   const anomalies = items.filter((i) => i.anomaly);
+  const present = items.filter((i) => i.state === "PRESENT_AND_ACTIVE").length;
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif" }}>
-      <h2>Camera and Computer Presence</h2>
-      <p style={{ color: "#555", fontSize: 13, maxWidth: 720 }}>
-        Each card combines the latest person detection in the workstation camera zone with
-        recent workstation input (keystrokes, mouse, active app). Cards refresh every{" "}
-        {REFRESH_MS / 1000} seconds.
-      </p>
-      <p style={{ color: "#555", fontSize: 13, maxWidth: 720 }}>
-        Zone to machine mapping comes from the <code>WAMSS_ZONE_MAP</code> environment
-        variable on the backend (JSON, for example{" "}
-        <code>{'{"RESTRICTED":"MACHINE_01"}'}</code>). Default zone is{" "}
-        <code>RESTRICTED</code> mapped to <code>MACHINE_01</code>. The lookback window is
-        set by <code>WAMSS_PRESENCE_WINDOW_SEC</code> (default 300 seconds).
-      </p>
-
+    <div className="rise">
       {error && (
-        <div style={{ background: "#fee2e2", padding: 12, borderRadius: 6, marginBottom: 16 }}>
-          Error loading presence: {error}
-        </div>
+        <ErrorNotice
+          message={`Could not load presence data: ${error}`}
+          onRetry={() => { void load(); }}
+        />
       )}
 
       {anomalies.length > 0 && (
-        <div
-          style={{
-            background: "#fef2f2",
-            border: "1px solid #dc2626",
-            padding: 12,
-            borderRadius: 6,
-            marginBottom: 16,
-          }}
-        >
-          <strong style={{ color: "#991b1b" }}>Anomaly:</strong> {anomalies.length}{" "}
-          workstation(s) active with nobody in the camera zone:{" "}
-          {anomalies.map((a) => a.machine_id).join(", ")}
+        <div className="notice notice-error rise" role="alert">
+          <p>
+            <strong>Anomaly:</strong> {anomalies.length} workstation(s) active with nobody in the
+            camera zone: {anomalies.map((a) => a.machine_id).join(", ")}
+          </p>
+          <Chip tone="bad">ANOMALY</Chip>
         </div>
       )}
 
-      {loading && <p>Loading...</p>}
+      <Reveal>
+        <section className="panel" aria-label="Presence overview">
+          <SectionHead title="Floor State" meta={`refresh ${REFRESH_MS / 1000}s`} />
+          <div className="grid-4">
+            <Stat label="Stations" value={items.length} mono />
+            <Stat label="Present and active" value={present} mono tone="var(--ok)" />
+            <Stat label="Anomalies" value={anomalies.length} mono tone={anomalies.length > 0 ? "var(--bad)" : "var(--text-2)"} />
+            <Stat label="Window" value={`${items[0]?.window_sec ?? 300}s`} mono />
+          </div>
+          <p style={{ color: "var(--text-2)", fontSize: 13, margin: "14px 0 0", maxWidth: "80ch" }}>
+            Each station combines the latest person detection in the workstation camera zone with
+            recent workstation input. Zone to machine mapping comes from the{" "}
+            <code>WAMSS_ZONE_MAP</code> backend setting; the lookback window from{" "}
+            <code>WAMSS_PRESENCE_WINDOW_SEC</code> (default 300 seconds).
+          </p>
+        </section>
+      </Reveal>
 
-      <div className="presence-grid">
-        {items.map((item) => {
-          const color = STATE_COLORS[item.state] || "#9ca3af";
-          return (
-            <div
-              key={item.machine_id}
-              className="presence-card"
-              style={{ borderColor: color }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <span
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: color,
-                    display: "inline-block",
-                  }}
-                />
-                <strong>{item.machine_id}</strong>
-                <span style={{ color: "#666", fontSize: 12 }}>zone {item.zone}</span>
-              </div>
-              <div style={{ fontWeight: 600, color, marginBottom: 4 }}>
-                {STATE_LABELS[item.state] || item.state}
-              </div>
-              <p style={{ fontSize: 12, color: "#555", margin: "0 0 8px" }}>
-                {STATE_DESCRIPTIONS[item.state] || ""}
-              </p>
-              <dl style={{ fontSize: 12, color: "#444", margin: 0 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <dt>Person present</dt>
-                  <dd style={{ margin: 0 }}>{item.person_present ? "yes" : "no"}</dd>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <dt>Workstation active</dt>
-                  <dd style={{ margin: 0 }}>{item.active ? "yes" : "no"}</dd>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <dt>Employee</dt>
-                  <dd style={{ margin: 0 }}>{item.employee_id || "-"}</dd>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <dt>Last seen (camera)</dt>
-                  <dd style={{ margin: 0 }}>{formatTime(item.last_vision_seen)}</dd>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <dt>Last input (computer)</dt>
-                  <dd style={{ margin: 0 }}>{formatTime(item.last_activity_seen)}</dd>
-                </div>
-              </dl>
-            </div>
-          );
-        })}
-        {items.length === 0 && !loading && (
-          <span style={{ color: "#888" }}>No workstations mapped yet.</span>
+      <section aria-label="Stations">
+        {loading && items.length === 0 ? (
+          <SkeletonCards count={3} />
+        ) : items.length === 0 ? (
+          <div className="panel">
+            <EmptyState
+              title="No workstations mapped"
+              body="Map camera zones to machines in the backend WAMSS_ZONE_MAP setting and stations will appear here."
+            />
+          </div>
+        ) : (
+          <div className="station-grid">
+            {items.map((item, i) => {
+              const tone = STATE_TONE[item.state] ?? "idle";
+              return (
+                <article
+                  key={item.machine_id}
+                  className={`station-card station-${tone} rise-stagger`}
+                  style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
+                  aria-label={`${item.machine_id}: ${STATE_LABELS[item.state] ?? item.state}`}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                    <Dot tone={tone} label={STATE_LABELS[item.state] ?? item.state} />
+                    <strong style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{item.machine_id}</strong>
+                    <span style={{ marginLeft: "auto" }}>
+                      <Chip tone={tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : "idle"}>
+                        {STATE_LABELS[item.state] ?? item.state}
+                      </Chip>
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 12.5, color: "var(--text-2)", margin: "0 0 12px" }}>
+                    {STATE_DESCRIPTIONS[item.state] ?? ""}
+                  </p>
+                  <dl style={{ margin: 0 }}>
+                    <div className="kv"><dt>Zone</dt><dd>{item.zone}</dd></div>
+                    <div className="kv"><dt>Person present</dt><dd>{item.person_present ? "yes" : "no"}</dd></div>
+                    <div className="kv"><dt>Workstation active</dt><dd>{item.active ? "yes" : "no"}</dd></div>
+                    <div className="kv"><dt>Employee</dt><dd>{item.employee_id || "-"}</dd></div>
+                    <div className="kv"><dt>Last seen (camera)</dt><dd>{formatClock(item.last_vision_seen)}</dd></div>
+                    <div className="kv"><dt>Last input (computer)</dt><dd>{formatClock(item.last_activity_seen)}</dd></div>
+                  </dl>
+                </article>
+              );
+            })}
+          </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
