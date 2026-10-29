@@ -169,6 +169,16 @@ class HeartRateStream:
         self._thread: Optional[threading.Thread] = None
         self._last_reading_at: float = 0.0
 
+    def latest_sample(self) -> Optional[Dict[str, float]]:
+        """
+        Latest heart-rate reading as {"bpm": int, "ts": <epoch seconds>},
+        for the strain-fusion pipeline (round 4). None until a reading
+        arrives. Additive accessor; changes no existing behavior.
+        """
+        if self.latest_bpm is None:
+            return None
+        return {"bpm": self.latest_bpm, "ts": self._last_reading_at}
+
     # ------------------------------------------------------------- control
 
     def start(

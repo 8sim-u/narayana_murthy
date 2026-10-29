@@ -58,6 +58,10 @@ class ActivityRecordIn(BaseModel):
     mouse_clicks: int = Field(0, ge=0)
     is_idle: bool = False
     strain_score: Optional[int] = Field(None, ge=0, le=100)
+    ml_stress_score: Optional[float] = Field(
+        None, ge=0, le=100,
+        description="ML behavioral stress score 0-100 (round 4, WAMSS_STRAIN_PIPELINE=1)",
+    )
 
 
 class ActivityBatchIn(BaseModel):
@@ -79,6 +83,7 @@ class ActivityRecordOut(BaseModel):
     mouse_clicks: int
     is_idle: bool
     strain_score: Optional[int]
+    ml_stress_score: Optional[float] = None
     strain_level: Optional[str] = None  # computed server-side from strain_score
     created_at: datetime
 
@@ -95,6 +100,7 @@ class StrainSummaryItem(BaseModel):
     machine_id: str
     employee_id: str
     strain_score: Optional[int]
+    ml_stress_score: Optional[float] = None
     strain_level: str
     last_seen: Optional[datetime]
     is_idle: bool
@@ -189,6 +195,7 @@ def ingest_activity(batch: ActivityBatchIn, db: Session = Depends(get_db)):
             mouse_clicks=r.mouse_clicks,
             is_idle=r.is_idle,
             strain_score=r.strain_score,
+            ml_stress_score=r.ml_stress_score,
         )
         for r in batch.records
     ]
@@ -243,6 +250,7 @@ def strain_summary(db: Session = Depends(get_db)):
             machine_id=r.machine_id,
             employee_id=r.employee_id,
             strain_score=r.strain_score,
+            ml_stress_score=r.ml_stress_score,
             strain_level=strain_level(r.strain_score),
             last_seen=r.created_at,
             is_idle=r.is_idle,
@@ -256,7 +264,7 @@ def list_activity(
     machine_id: Optional[str] = Query(None, description="Filter by machine ID"),
     employee_id: Optional[str] = Query(None, description="Filter by employee ID"),
     office_id: Optional[str] = Query(None, description="Filter by office ID (e.g. hq, branch-north)"),
-    event_type: Optional[str] = Query(None, description="Filter by event type (activity, break_suggested, alert)"),
+    event_type: Optional[str] = Query(None, description="Filter by event type (activity, break_suggested, fatigue_suspected, alert)"),
     start_time: Optional[datetime] = Query(None, description="Filter records at or after this UTC datetime"),
     end_time: Optional[datetime] = Query(None, description="Filter records at or before this UTC datetime"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of records to return"),

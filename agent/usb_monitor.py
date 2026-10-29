@@ -293,6 +293,319 @@ class WriteBurstTracker:
 
 
 # ---------------------------------------------------------------------------
+# USB anomaly detection: first-seen serials, allowlist, HID-spoof heuristic,
+# off-hours mass-storage mounts.
+#
+# This section classifies enriched device descriptions and emits structured
+# anomaly events. A device description is a dict with:
+#   {"serial": <usb serial string or None>,
+#    "device_class": <"mass_storage"|"hid_keyboard"|"hid_mouse"|"hid"|...>,
+#    "label": <human label>, "mountpoint": <path or None>}
+#
+# Emitted events share a common shape:
+#   {"event_type", "severity", "reason", "user", "serial", "label",
+#    "timestamp", "detail"}
+# with severities "high" / "medium" matching the backend alert vocabulary in
+# backend/app/security.py. To ingest these over POST /security/events the
+# backend SecurityEventType enum needs the new type values added
+# (usb_first_seen, usb_unauthorized, usb_hid_spoof_suspected, usb_offhours_mount).
+#
+# Serial sources per platform (best effort; no content is ever read):
+#   * Linux: pyudev device properties ID_SERIAL_SHORT / ID_SERIAL.
+#   * Windows: WMI Win32_DiskDrive.SerialNumber, or the Security log
+#     EventID 6416 "new external device" record. Both paths need a real
+#     machine and are NOT exercised by the unit tests; they stay documented
+#     here until verified on hardware.
+#
+# Privacy note: only device metadata (serial, class, label, time) is used.
+# ---------------------------------------------------------------------------
+
+import getpass
+import json as _json
+
+# Env knobs for this section.
+WAMSS_USB_ALLOWLIST = os.getenv("WAMSS_USB_ALLOWLIST", "")
+WAMSS_USB_STATE = os.getenv("WAMSS_USB_STATE", "")
+WAMSS_USB_WORK_HOURS = os.getenv("WAMSS_WORK_HOURS", "09:00-18:00")
+WAMSS_USB_TZ = os.getenv("WAMSS_SECURITY_TZ", "UTC")
+
+HID_DEVICE_CLASSES = frozenset({"hid", "hid_keyboard", "hid_mouse"})
+MASS_STORAGE_CLASSES = frozenset({"mass_storage", "storage", "disk", "usb_disk"})
+
+
+def _wamss_config_dir() -> str:
+    """Agent config dir; overridable via WAMSS_CONFIG_DIR for tests."""
+    return os.getenv(
+        "WAMSS_CONFIG_DIR", os.path.join(os.path.expanduser("~"), ".wamss")
+    )
+
+
+def _default_state_path() -> str:
+    if WAMSS_USB_STATE:
+        return WAMSS_USB_STATE
+    return os.path.join(_wamss_config_dir(), "usb_seen.json")
+
+
+def _default_allowlist_path() -> str:
+    if WAMSS_USB_ALLOWLIST:
+        return WAMSS_USB_ALLOWLIST
+    return os.path.join(_wamss_config_dir(), "usb_allowlist.txt")
+
+
+def _current_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001
+        return os.getenv("USERNAME", os.getenv("USER", "unknown"))
+
+
+def load_usb_allowlist(path: Optional[str] = None) -> set:
+    """
+    Load the USB serial allowlist: one serial per line; blank lines and
+    lines starting with '#' are ignored. Missing file -> empty set.
+    """
+    target = path or _default_allowlist_path()
+    serials = set()
+    try:
+        with open(target, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    serials.add(line)
+    except FileNotFoundError:
+        logger.info("USB allowlist file not found at %s; allowlist is empty", target)
+    except OSError as exc:
+        logger.warning("Could not read USB allowlist %s: %s", target, exc)
+    return serials
+
+
+def _parse_hhmm_range(work_hours: str):
+    """Parse "HH:MM-HH:MM" into (start_time, end_time); raises ValueError."""
+    start_s, end_s = work_hours.split("-")
+    start = _dt.datetime.strptime(start_s.strip(), "%H:%M").time()
+    end = _dt.datetime.strptime(end_s.strip(), "%H:%M").time()
+    return start, end
+
+
+def _in_work_hours(moment: _dt.datetime, work_hours: str) -> bool:
+    """True when moment's time-of-day is inside the work-hours window."""
+    start_h, end_h = _parse_hhmm_range(work_hours)
+    t = moment.time()
+    if start_h <= end_h:
+        return start_h <= t < end_h
+    return t >= start_h or t < end_h  # overnight window, e.g. 22:00-06:00
+
+
+def _as_local(ts: _dt.datetime, tz_name: str) -> _dt.datetime:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        tz = _dt.timezone.utc
+    return ts.astimezone(tz)
+
+
+def lookup_device_serial(device_node: Optional[str]) -> Optional[str]:
+    """
+    Best-effort USB serial lookup for a Linux device node (e.g. /dev/sdb1)
+    via pyudev ID_SERIAL_SHORT. Returns None when unavailable. Windows
+    callers should use WMI Win32_DiskDrive.SerialNumber instead; that path
+    is not implemented here and needs a real Windows machine to verify.
+    """
+    if not device_node:
+        return None
+    try:
+        import pyudev
+
+        context = pyudev.Context()
+        device = pyudev.Devices.from_device_file(context, device_node)
+        for key in ("ID_SERIAL_SHORT", "ID_SERIAL"):
+            value = device.get(key)
+            if value:
+                return str(value)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+class UsbAnomalyDetector:
+    """
+    Stateful USB anomaly classifier for one workstation user.
+
+    * First-seen serials are persisted per user in a small JSON state file
+      (default ~/.wamss/usb_seen.json, overridable via WAMSS_USB_STATE).
+    * The allowlist (default ~/.wamss/usb_allowlist.txt, overridable via
+      WAMSS_USB_ALLOWLIST) is loaded once at startup.
+    * Off-hours checks use WAMSS_WORK_HOURS ("HH:MM-HH:MM") as the baseline
+      until the backend hours-baselining API (GET /hours/baseline) exists;
+      the upgrade path is to fetch the per-user normal window from the
+      backend and pass it in place of the env value.
+    """
+
+    def __init__(
+        self,
+        user: Optional[str] = None,
+        state_path: Optional[str] = None,
+        allowlist_path: Optional[str] = None,
+        work_hours: Optional[str] = None,
+        tz_name: Optional[str] = None,
+    ) -> None:
+        self.user = user or _current_user()
+        self.state_path = state_path or _default_state_path()
+        self.allowlist = load_usb_allowlist(allowlist_path)
+        self.work_hours = work_hours or WAMSS_USB_WORK_HOURS
+        self.tz_name = tz_name or WAMSS_USB_TZ
+        self._seen: Dict[str, str] = {}
+        self._load_state()
+
+    # -- persistent first-seen state -------------------------------------
+    def _load_state(self) -> None:
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as fh:
+                data = _json.load(fh)
+            user_state = data.get(self.user, {}) if isinstance(data, dict) else {}
+            self._seen = {str(k): str(v) for k, v in user_state.items()}
+        except (FileNotFoundError, ValueError, OSError):
+            self._seen = {}
+
+    def _save_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.state_path) or ".", exist_ok=True)
+            try:
+                with open(self.state_path, "r", encoding="utf-8") as fh:
+                    data = _json.load(fh)
+                if not isinstance(data, dict):
+                    data = {}
+            except (FileNotFoundError, ValueError, OSError):
+                data = {}
+            data[self.user] = self._seen
+            with open(self.state_path, "w", encoding="utf-8") as fh:
+                _json.dump(data, fh, indent=2)
+        except OSError as exc:
+            logger.warning("Could not persist USB seen-state: %s", exc)
+
+    def is_first_seen(self, serial: Optional[str]) -> bool:
+        """True when serial is non-empty and never recorded for this user."""
+        return bool(serial) and serial not in self._seen
+
+    # -- classification --------------------------------------------------
+    def _event(
+        self,
+        event_type: str,
+        severity: str,
+        reason: str,
+        device: Dict[str, object],
+        timestamp: str,
+    ) -> Dict[str, object]:
+        return {
+            "event_type": event_type,
+            "severity": severity,
+            "reason": reason,
+            "user": self.user,
+            "serial": device.get("serial"),
+            "label": device.get("label"),
+            "timestamp": timestamp,
+            "detail": {
+                "device_class": device.get("device_class"),
+                "mountpoint": device.get("mountpoint"),
+            },
+        }
+
+    def check_device(
+        self,
+        device: Dict[str, object],
+        now: Optional[_dt.datetime] = None,
+    ) -> List[Dict[str, object]]:
+        """
+        Classify one device description and return anomaly events (possibly
+        empty). Rules, in order:
+
+        * serial never seen for this user -> usb_first_seen (medium); the
+          serial is recorded immediately (write-through).
+        * serial not on the allowlist -> usb_unauthorized (high).
+        * device presents as HID keyboard/mouse AND is first-seen ->
+          usb_hid_spoof_suspected (high). HEURISTIC: a legitimate new
+          keyboard also fires; this is a triage signal for BadUSB-style
+          spoofing, not proof of an attack. Human verification required.
+        * mass-storage mount outside the baseline work-hours window ->
+          usb_offhours_mount (medium).
+
+        `now` is injectable for tests; defaults to current UTC time.
+        """
+        events: List[Dict[str, object]] = []
+        timestamp = str(device.get("timestamp") or _now_iso())
+        serial = device.get("serial")
+        serial_str = str(serial) if serial else None
+        device_class = str(device.get("device_class") or "").lower()
+        label = device.get("label") or "unknown device"
+
+        first_seen = self.is_first_seen(serial_str)
+
+        if first_seen:
+            assert serial_str is not None
+            events.append(
+                self._event(
+                    "usb_first_seen",
+                    "medium",
+                    f"USB device seen for the first time for user {self.user}: {label}",
+                    device,
+                    timestamp,
+                )
+            )
+            self._seen[serial_str] = timestamp
+            self._save_state()
+
+        if serial_str and serial_str not in self.allowlist:
+            events.append(
+                self._event(
+                    "usb_unauthorized",
+                    "high",
+                    f"USB device serial not on the allowlist: {label} (serial {serial_str})",
+                    device,
+                    timestamp,
+                )
+            )
+
+        if device_class in HID_DEVICE_CLASSES and first_seen:
+            events.append(
+                self._event(
+                    "usb_hid_spoof_suspected",
+                    "high",
+                    "First-seen device presents as HID keyboard/mouse; possible "
+                    "BadUSB spoofing. Heuristic only: verify the physical device.",
+                    device,
+                    timestamp,
+                )
+            )
+
+        is_storage = device_class in MASS_STORAGE_CLASSES or bool(device.get("mountpoint"))
+        if is_storage:
+            moment = now or _dt.datetime.now(_dt.timezone.utc)
+            local = _as_local(moment, self.tz_name)
+            try:
+                inside = _in_work_hours(local, self.work_hours)
+            except ValueError:
+                logger.warning("Bad WAMSS_WORK_HOURS %r; skipping off-hours check", self.work_hours)
+                inside = True
+            if not inside:
+                events.append(
+                    self._event(
+                        "usb_offhours_mount",
+                        "medium",
+                        f"Mass-storage device mounted outside work hours "
+                        f"({self.work_hours} {self.tz_name}): {label}",
+                        device,
+                        timestamp,
+                    )
+                )
+
+        return events
+
+
+# ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------
 
@@ -344,6 +657,28 @@ def self_test() -> int:
         f"threshold_mb={result['threshold_mb']} burst={result['burst']}"
     )
     print("\nself-test OK: no file content or keystrokes were read.")
+
+    print("\n-- USB anomaly detector (synthetic devices, temp state dir) --")
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        detector = UsbAnomalyDetector(
+            user="selftest-user",
+            state_path=os.path.join(tmp, "usb_seen.json"),
+            allowlist_path=os.path.join(tmp, "allowlist.txt"),
+            work_hours="09:00-18:00",
+            tz_name="UTC",
+        )
+        demo_devices = [
+            {"serial": "DEMO-NEW-1", "device_class": "mass_storage",
+             "label": "DEMO flash drive", "mountpoint": "/media/demo"},
+            {"serial": "DEMO-HID-1", "device_class": "hid_keyboard",
+             "label": "DEMO keyboard"},
+        ]
+        for dev in demo_devices:
+            for ev in detector.check_device(dev):
+                print(f"  {ev['event_type']} [{ev['severity']}] {ev['reason']}")
+    print("anomaly demo OK")
     return 0
 
 

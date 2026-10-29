@@ -16,3 +16,10 @@ bleak==3.0.2
 # USB/DLP signal monitor (agent/usb_monitor.py). pywin32 (Windows) and psutil
 # are already listed above; pyudev is optional on Linux (polling fallback otherwise).
 pyudev==0.24.5; sys_platform == "linux"
+
+# ML stress dynamics engine (agent/ml_stress.py, agent/train.py, round 4).
+# ml_stress.py itself is stdlib-only; numpy arrives transitively with
+# scikit-learn and is listed explicitly for the feature pipeline.
+numpy==1.26.4
+scikit-learn==1.9.1
+joblib==1.6.0

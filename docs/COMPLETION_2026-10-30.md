@@ -160,3 +160,104 @@ Built by five parallel agents and merged in one push.
   mapping, Windows WMI/USB paths: need the user's real hardware (documented).
 - DB credential rotation still owed (no access to the credential store).
 - Dashboard-behind-auth needs an API proxy (recorded in `docs/AUTH.md`).
+
+## Round 4: literature-driven build + deployment pack (2026-10-30)
+
+Built from the deep-research implementation recipes (Pepa 2021, Nagelin
+2023, Hibbeln 2017, Banholzer 2021, Koldijk 2018, Acien 2022, Epp 2011).
+
+### ML stress dynamics engine (Agent A)
+
+- `agent/ml_stress.py` (new): 27 literature-ranked features per 60 s
+  non-overlapping window (15 keyboard timing features from anonymized
+  press/release pairs, 12 mouse dynamics features from `{ts, x, y, kind}`
+  events), zero-filled empty windows, per-user Welford z-score
+  `RollingBaseline` (cold-start safe), `unsupervised_strain_score` 0-100,
+  `SupervisedStressModel` (joblib load/predict). stdlib-only at runtime.
+  Privacy absolute: timing aggregates only, never key identities/content.
+- `agent/train.py` (new): `python -m agent.train --csv labeled.csv --out
+  models/stress_rf.joblib`; stratified k-fold CV printed, balanced
+  RandomForest refit, joblib dict artifact. SWELL-KW column mapping notes
+  in `agent/README.md`.
+- Tests: `agent/tests/test_ml_stress.py`, 17/17 green, including a
+  synthetic calm-vs-stressed end-to-end assertion.
+- Needs real machines: pynput listeners must emit anonymized timings for
+  full fidelity (interval synthesis works meanwhile); baselines need
+  multi-day real data; supervised training needs labeled data.
+
+### Fatigue detection + fusion + strain wiring (Agent B)
+
+- `agent/fatigue.py` (new): `FatigueTracker`, k-NN (k=3) session distance
+  per Acien 2022, robust z > 2.5 with 4+ prior sessions raises
+  `fatigue_suspected` events (moderate/high).
+- `agent/fusion.py` (new): early (feature-level) fusion when HR is fresh,
+  late (decision-level) fusion via `mode="late"`, missing-modality masking
+  (HR stale > 120 s falls back to behavioral-only).
+- `agent/strain.py`: additive round-4 section (`AnonymizedTimingBuffer`,
+  guarded `ml_stress` import, `enrich_strain_score()`); existing heuristic
+  untouched. `agent/wearable_ble.py` gained a `latest_sample()` accessor.
+- `agent/activity_agent.py`: wiring applied behind `WAMSS_STRAIN_PIPELINE=1`
+  (default 0 = heuristic-only behavior bit-identical); anonymized timing
+  buffers, fatigue events spooled as `fatigue_suspected` records,
+  `ml_stress_score` posted on activity records.
+- Tests: 38 new (fatigue, fusion, strain wiring), all green.
+
+### Privacy-preserving presence mode (Agent C, vision)
+
+- `WAMSS_PRIVACY_MODE=1` in `vision/multicamera.py`: frames in memory
+  only, person-count/pose aggregates only, identity/gaze paths explicitly
+  refused, alert snapshots face-blurred (MediaPipe) or refused when
+  MediaPipe is absent, no preview windows, 5 s occupancy debounce.
+- MediaPipe is an optional dependency with YOLO fallback; non-privacy
+  path unchanged.
+- Tests: `vision/tests/test_privacy.py`, 29/29 green (synthetic frames).
+- Still needs real cameras: debounce tuning, pose heuristics, snapshot
+  guarantees, end-to-end privacy events.
+
+### USB anomaly upgrade + hours baselining (Agent D)
+
+- `agent/usb_monitor.py`: `UsbAnomalyDetector` (first-seen serials per
+  user in `~/.wamss/usb_seen.json`, allowlist file, BadUSB HID-spoof
+  heuristic, off-hours mounts). New event types `usb_first_seen`,
+  `usb_unauthorized`, `usb_hid_spoof_suspected`, `usb_offhours_mount`
+  accepted by `POST /security/events` and mapped in `flag_anomalies()`.
+- `backend/app/hours.py` (new, mounted in `main.py`):
+  `GET /hours/baseline` (30-day 15-min-bin histogram, 5th/95th percentile
+  normal window) and `GET /hours/anomaly` (z-score vs personal norm,
+  after-hours flag, burstiness). See `docs/HOURS_API.md`.
+- Tests: 10 USB + 11 hours tests, all green.
+
+### Backend integration (coordinator)
+
+- `ActivityLog.ml_stress_score` (nullable Float) added; accepted on
+  ingest, returned by `GET /activity`, surfaced in
+  `GET /activity/strain-summary` (lights up the dashboard's ML score
+  element). Existing databases need
+  `ALTER TABLE activity_logs ADD COLUMN ml_stress_score FLOAT;`.
+- `GET /activity` event-type filter now lists `fatigue_suspected`.
+
+### Deployment pack (Agent F)
+
+- `deploy/` (new): `deploy.sh`/`deploy.ps1` (one-command stack deploy,
+  first-run `.env` + generated `WAMSS_API_KEY`, health-gated, idempotent),
+  `preflight.sh`/`preflight.ps1` (readiness checklist), `install-agent.sh`
+  / `install-agent.ps1` (workstation installers with uninstall),
+  `backup.sh`/`restore.sh` (timestamped DB archives).
+- `docs/DEPLOYMENT_PACK.md` (new): ordered 8-step runbook plus
+  troubleshooting. Root README gained a `## Deploy` section.
+- Verified: `bash -n` on all scripts, `--help` dry runs, live preflight
+  (correctly fails without docker), secret-generation logic tested in
+  isolation. `.ps1` syntax best-effort only (no pwsh here); images not
+  built (no docker here).
+
+### Test totals
+
+Backend suite and agent suite re-run by the coordinator after the merge;
+counts recorded below. Frontend `npm run build` clean.
+
+### Still open
+
+- Real-machine validation: cameras, BLE pairing, Windows USB/WMI paths,
+  `.ps1` smoke run, docker image builds, SMTP credentials, zone mapping.
+- DB credential rotation still owed (no access).
+- Dashboard-behind-auth API proxy follow-up (recorded in `docs/AUTH.md`).

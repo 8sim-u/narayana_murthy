@@ -15,3 +15,17 @@ ultralytics>=8.4,<9
 opencv-python>=4.10,<6
 torch>=2.0,<3
 requests>=2.32,<3
+
+# OPTIONAL: needed only for WAMSS_PRIVACY_MODE=1 (privacy-preserving presence
+# mode in vision/multicamera.py). Provides the on-device MediaPipe backend
+# (face detection for person counting, pose for the coarse standing/sitting
+# aggregate) and face blurring for anonymized occupancy snapshots.
+#
+# If absent, privacy mode still works via a graceful fallback: the YOLO
+# person-count aggregate path (no pose, no track ids), and ANY frame that
+# would need storing is refused with a logged reason instead. The
+# non-privacy path never needs MediaPipe.
+#
+# Install explicitly on the edge node when privacy mode is required:
+#   pip install mediapipe
+# mediapipe>=0.10.14

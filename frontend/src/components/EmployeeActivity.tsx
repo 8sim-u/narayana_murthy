@@ -27,6 +27,8 @@ interface StrainSummary {
   strain_level: string;
   last_seen: string | null;
   is_idle: boolean;
+  // Not yet served by GET /activity/strain-summary; renders "-" until the backend ships it.
+  ml_stress_score?: number | null;
 }
 
 const STRAIN_COLORS: Record<string, string> = {
@@ -35,6 +37,18 @@ const STRAIN_COLORS: Record<string, string> = {
   red: "#dc2626",
   unknown: "#9ca3af",
 };
+
+// Distinct badge colors for the activity-events feed on the timeline.
+const EVENT_BADGE: Record<string, { bg: string; fg: string }> = {
+  activity: { bg: "#e0f2fe", fg: "#0369a1" },
+  alert: { bg: "#fee2e2", fg: "#dc2626" },
+  break_suggested: { bg: "#fef3c7", fg: "#d97706" },
+  fatigue_suspected: { bg: "#ede9fe", fg: "#7c3aed" },
+};
+
+function eventBadge(type: string) {
+  return EVENT_BADGE[type] ?? { bg: "#f3f4f6", fg: "#6b7280" };
+}
 
 function minutesBetween(start: string, end: string): number {
   const ms = new Date(end).getTime() - new Date(start).getTime();
@@ -117,9 +131,14 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
   }, [strain, idleThresholdMin]);
 
   const alerts = useMemo(
-    () => records.filter((r) => r.event_type === "alert" || r.event_type === "break_suggested"),
+    () =>
+      records.filter(
+        (r) => r.event_type === "alert" || r.event_type === "break_suggested" || r.event_type === "fatigue_suspected"
+      ),
     [records]
   );
+
+  const timelineRows = useMemo(() => records.slice(0, 100), [records]);
 
   return (
     <div style={{ padding: 24, fontFamily: "system-ui, sans-serif", maxWidth: 1100 }}>
@@ -138,7 +157,8 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
       </div>
       <p style={{ color: "#555", fontSize: 13 }}>
         Strain level is a heuristic workload signal (green &lt; 40, amber 40-69, red &ge; 70).
-        It is not a medical measure.
+        It is not a medical measure. ML stress is an experimental model score shown when the
+        backend provides it.
       </p>
 
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
@@ -213,7 +233,10 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
               {s.employee_id}@{s.machine_id}
             </span>
             <span style={{ color: "#666", fontSize: 12 }}>
-              {s.strain_score ?? "-"} ({s.strain_level})
+              strain {s.strain_score ?? "-"} ({s.strain_level})
+            </span>
+            <span style={{ color: "#666", fontSize: 12 }}>
+              ML stress {(s.ml_stress_score ?? null) ?? "-"}
             </span>
           </div>
         ))}
@@ -254,12 +277,29 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
         <>
           <h3>Break reminders &amp; alerts</h3>
           <ul>
-            {alerts.map((a) => (
-              <li key={a.id}>
-                [{a.event_type}] {a.employee_id}@{a.machine_id} - {a.window_title} (
-                {new Date(a.start_time).toLocaleString()})
-              </li>
-            ))}
+            {alerts.map((a) => {
+              const b = eventBadge(a.event_type);
+              return (
+                <li key={a.id}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      background: b.bg,
+                      color: b.fg,
+                      borderRadius: 4,
+                      padding: "1px 8px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      marginRight: 6,
+                    }}
+                  >
+                    {a.event_type}
+                  </span>
+                  {a.employee_id}@{a.machine_id} - {a.window_title} (
+                  {new Date(a.start_time).toLocaleString()})
+                </li>
+              );
+            })}
           </ul>
         </>
       )}
@@ -270,6 +310,7 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "2px solid #ddd" }}>
             <th style={{ padding: 6 }}>Time</th>
+            <th style={{ padding: 6 }}>Type</th>
             <th style={{ padding: 6 }}>Employee</th>
             <th style={{ padding: 6 }}>Machine</th>
             <th style={{ padding: 6 }}>App</th>
@@ -281,33 +322,60 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
           </tr>
         </thead>
         <tbody>
-          {activityRows.slice(0, 100).map((r) => (
-            <tr key={r.id} style={{ borderBottom: "1px solid #eee" }}>
-              <td style={{ padding: 6, fontSize: 12 }}>{new Date(r.start_time).toLocaleString()}</td>
-              <td style={{ padding: 6 }}>{r.employee_id}</td>
-              <td style={{ padding: 6 }}>{r.machine_id}</td>
-              <td style={{ padding: 6 }}>{r.app_name}</td>
-              <td style={{ padding: 6, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }}>
-                {r.window_title}
-              </td>
-              <td style={{ padding: 6 }}>{r.keystrokes}</td>
-              <td style={{ padding: 6 }}>{r.mouse_clicks}</td>
-              <td style={{ padding: 6 }}>{r.is_idle ? "yes" : "no"}</td>
-              <td style={{ padding: 6 }}>
-                <span
-                  style={{
-                    display: "inline-block",
-                    width: 10,
-                    height: 10,
-                    borderRadius: "50%",
-                    background: STRAIN_COLORS[r.strain_level || "unknown"],
-                    marginRight: 4,
-                  }}
-                />
-                {r.strain_score ?? "-"}
-              </td>
-            </tr>
-          ))}
+          {timelineRows.map((r) => {
+            const isEvent = r.event_type !== "activity";
+            const b = eventBadge(r.event_type);
+            return (
+              <tr
+                key={r.id}
+                style={{
+                  borderBottom: "1px solid #eee",
+                  background: isEvent ? b.bg : undefined,
+                }}
+              >
+                <td style={{ padding: 6, fontSize: 12 }}>{new Date(r.start_time).toLocaleString()}</td>
+                <td style={{ padding: 6 }}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      background: b.bg,
+                      color: b.fg,
+                      border: `1px solid ${b.fg}`,
+                      borderRadius: 4,
+                      padding: "1px 8px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {r.event_type}
+                  </span>
+                </td>
+                <td style={{ padding: 6 }}>{r.employee_id}</td>
+                <td style={{ padding: 6 }}>{r.machine_id}</td>
+                <td style={{ padding: 6 }}>{isEvent ? "-" : r.app_name}</td>
+                <td style={{ padding: 6, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {r.window_title}
+                </td>
+                <td style={{ padding: 6 }}>{isEvent ? "-" : r.keystrokes}</td>
+                <td style={{ padding: 6 }}>{isEvent ? "-" : r.mouse_clicks}</td>
+                <td style={{ padding: 6 }}>{r.is_idle ? "yes" : "no"}</td>
+                <td style={{ padding: 6 }}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: 10,
+                      height: 10,
+                      borderRadius: "50%",
+                      background: STRAIN_COLORS[r.strain_level || "unknown"],
+                      marginRight: 4,
+                    }}
+                  />
+                  {r.strain_score ?? "-"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       </div>

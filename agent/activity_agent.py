@@ -32,6 +32,14 @@ from typing import Callable, Deque, Dict, Optional, Tuple
 import requests
 
 from strain import StrainConfig, compute_strain_score
+try:
+    # Round 4: guarded so the agent runs fine without the ML pipeline.
+    from strain import AnonymizedTimingBuffer, enrich_strain_score
+    _STRAIN_PIPELINE_IMPORT_OK = True
+except ImportError:  # pragma: no cover - defensive
+    AnonymizedTimingBuffer = None  # type: ignore
+    enrich_strain_score = None  # type: ignore
+    _STRAIN_PIPELINE_IMPORT_OK = False
 
 try:
     from notifier import notify_break
@@ -109,6 +117,19 @@ EXCLUDED_TITLES_RE = os.environ.get("WAMSS_EXCLUDED_TITLES", "").strip()
 
 # Optional smartwatch heart rate blended into the strain score.
 HR_RESTING_BPM = _getenv_int("WAMSS_STRAIN_HR_RESTING", 90)
+
+# Round 4: opt-in ML/fatigue/fusion strain pipeline. Default 0 keeps the
+# heuristic-only behavior exactly as before.
+STRAIN_PIPELINE_ON = (
+    os.environ.get("WAMSS_STRAIN_PIPELINE", "0") == "1"
+    and _STRAIN_PIPELINE_IMPORT_OK
+)
+
+# In-memory anonymized timing buffers for the ML feature extractors.
+# Gaps between input events only: no key identities, no key content, no
+# coordinates. Never persisted, never spooled. Drained each cycle.
+KEY_TIMINGS = AnonymizedTimingBuffer() if AnonymizedTimingBuffer else None
+MOUSE_TIMINGS = AnonymizedTimingBuffer() if AnonymizedTimingBuffer else None
 
 STRAIN_CFG = StrainConfig.from_env()
 
@@ -227,6 +248,9 @@ class InputCounter:
         with self._lock:
             self.keystrokes += 1
             self.last_input_ts = time.time()
+        # Round 4: anonymized press-gap timing for ML features.
+        if STRAIN_PIPELINE_ON and KEY_TIMINGS is not None:
+            KEY_TIMINGS.record_event()
 
     def _on_click(self, _x, _y, _button, _pressed) -> None:
         if not _pressed:
@@ -234,6 +258,10 @@ class InputCounter:
         with self._lock:
             self.mouse_clicks += 1
             self.last_input_ts = time.time()
+        # Round 4: anonymized click-gap timing for ML features.
+        # _x/_y are deliberately ignored: no coordinates are captured.
+        if STRAIN_PIPELINE_ON and MOUSE_TIMINGS is not None:
+            MOUSE_TIMINGS.record_event()
 
     def start(self) -> None:
         try:
@@ -461,7 +489,10 @@ class StrainTracker:
 
 # ---------------------------------------------------------------- collector loop
 
-def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None) -> Optional[Dict]:
+def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None,
+                 spool: Optional["Spool"] = None) -> Optional[Dict]:
+    """spool is optional and only used by the round-4 pipeline to spool
+    fatigue_suspected records. Existing callers are unaffected."""
     app_name, window_title, process_name = get_active_window()
     if _is_excluded(app_name, window_title, process_name):
         return None  # privacy exclusion: never logged, not even spooled
@@ -472,17 +503,44 @@ def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None) 
     end = datetime.now(timezone.utc)
     start = end  # segment granularity is LOG_INTERVAL; start=end replaced by caller cadence
 
+    # Round 4: a session ends when the continuous-active clock resets after
+    # a long idle stretch; the fatigue tracker consumes it.
+    was_active = tracker.active_start_ts is not None
     tracker.reset_active_clock_if_rested(idle_sec)
+    session_ended = was_active and tracker.active_start_ts is None
     window_key = f"{process_name}\x00{window_title}"
     tracker.observe(keystrokes, mouse_clicks, window_key, is_idle)
     strain = tracker.signals()
 
-    # Blend optional smartwatch heart rate into the strain score:
-    # elevated BPM adds at most 10 points (+1 per 2 BPM over resting).
-    score = strain.score
-    bpm = hr_stream.latest_bpm if (hr_stream is not None and hr_stream.available) else None
-    if bpm is not None and bpm > HR_RESTING_BPM:
-        score = min(100, score + min(10, (bpm - HR_RESTING_BPM) // 2))
+    ml_score = None
+    if STRAIN_PIPELINE_ON:
+        # Round 4 pipeline: ml features -> session fatigue -> HR fusion.
+        # The heuristic result rides along inside `enriched` so break
+        # thresholds and the backend HIGH_STRAIN_DETECTED rule keep their
+        # meaning. enrich_strain_score never raises: any ML/HR failure
+        # falls back to the heuristic score.
+        enriched = enrich_strain_score(
+            strain,
+            key_intervals=KEY_TIMINGS.drain() if KEY_TIMINGS else (),
+            mouse_intervals=MOUSE_TIMINGS.drain() if MOUSE_TIMINGS else (),
+            employee_id=EMPLOYEE_ID,
+            session_ended=session_ended,
+            hr_stream=hr_stream,
+            resting_bpm=HR_RESTING_BPM,
+        )
+        score = enriched.score
+        ml_score = enriched.ml_score
+        fatigue_event = enriched.fatigue_event
+        if fatigue_event is not None and spool is not None:
+            spool_fatigue_event(spool, fatigue_event, score)
+    else:
+        # Blend optional smartwatch heart rate into the strain score:
+        # elevated BPM adds at most 10 points (+1 per 2 BPM over resting).
+        score = strain.score
+        bpm = hr_stream.latest_bpm if (hr_stream is not None and hr_stream.available) else None
+        if bpm is not None and bpm > HR_RESTING_BPM:
+            score = min(100, score + min(10, (bpm - HR_RESTING_BPM) // 2))
+        fatigue_event = None
 
     return {
         "record_id": str(uuid.uuid4()),
@@ -499,7 +557,35 @@ def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None) 
         "mouse_clicks": mouse_clicks,
         "is_idle": is_idle,
         "strain_score": score,
+        "ml_stress_score": ml_score,
     }
+
+
+def spool_fatigue_event(spool: Spool, fatigue_event: dict,
+                        strain_score: int) -> None:
+    """Spool a fatigue_suspected record so it flows through the normal
+    /activity ingest path, like break_suggested does. Round 4."""
+    record = {
+        "record_id": str(uuid.uuid4()),
+        "machine_id": MACHINE_ID,
+        "employee_id": fatigue_event.get("employee_id", EMPLOYEE_ID),
+        "office_id": OFFICE_ID,
+        "event_type": "fatigue_suspected",
+        "app_name": "wamss-agent",
+        "window_title": ("fatigue_suspected severity="
+                         f"{fatigue_event.get('severity')} "
+                         f"robust_z={fatigue_event.get('detail', {}).get('robust_z')}"),
+        "process_name": "wamss-agent",
+        "start_time": _utcnow_iso(),
+        "end_time": _utcnow_iso(),
+        "keystrokes": 0,
+        "mouse_clicks": 0,
+        "is_idle": False,
+        "strain_score": strain_score,
+    }
+    spool.append(record)
+    logger.info("fatigue_suspected spooled (severity=%s)",
+                fatigue_event.get("severity"))
 
 
 def run(stop_after: Optional[float] = None,
@@ -536,7 +622,7 @@ def run(stop_after: Optional[float] = None,
         segment_start = datetime.now(timezone.utc)
         while True:
             time.sleep(LOG_INTERVAL)
-            record = collect_once(counter, tracker, hr_stream=hr_stream)
+            record = collect_once(counter, tracker, hr_stream=hr_stream, spool=spool)
             if record is None:
                 segment_start = datetime.now(timezone.utc)
                 continue  # excluded window: nothing logged or spooled

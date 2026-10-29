@@ -30,6 +30,7 @@ from app.security import router as security_router
 from app.policy import router as policy_router
 from app.exports import router as exports_router
 from app.analytics import router as analytics_router
+from app.hours import router as hours_router
 
 logger = logging.getLogger("wamss.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -89,6 +90,7 @@ app.include_router(security_router)
 app.include_router(policy_router)
 app.include_router(exports_router)
 app.include_router(analytics_router)
+app.include_router(hours_router)
 
 
 @app.get("/health")

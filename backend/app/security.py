@@ -53,6 +53,11 @@ class SecurityEventType(str, Enum):
     USB_REMOVE = "usb_remove"
     FILE_WRITE_BURST = "file_write_burst"
     AFTER_HOURS_ACTIVITY = "after_hours_activity"
+    # Round 4: USB anomaly detector event types (agent/usb_monitor.py).
+    USB_FIRST_SEEN = "usb_first_seen"                    # medium
+    USB_UNAUTHORIZED = "usb_unauthorized"                # high
+    USB_HID_SPOOF_SUSPECTED = "usb_hid_spoof_suspected"  # high
+    USB_OFFHOURS_MOUNT = "usb_offhours_mount"            # medium
 
 
 class SecurityEventIn(BaseModel):
@@ -127,6 +132,10 @@ def flag_anomalies(
 
     Rules (one alert per event, first matching rule wins):
       * any usb_insert / usb_remove            -> severity "high"
+      * usb_first_seen                           -> severity "medium"
+      * usb_unauthorized                         -> severity "high"
+      * usb_hid_spoof_suspected                  -> severity "high"
+      * usb_offhours_mount                       -> severity "medium"
       * file_write_burst at/above threshold    -> severity "medium"
       * after_hours_activity, or any non-USB event whose local timestamp
         falls outside the configured work-hours window -> severity "medium"
@@ -169,6 +178,27 @@ def flag_anomalies(
             action = "inserted" if event_type == "usb_insert" else "removed"
             device = detail.get("device", "unknown device") if isinstance(detail, dict) else "unknown device"
             alert("high", f"Removable storage {action}: {device}")
+            flagged = True
+
+        # Round 4: USB anomaly detector event types (agent/usb_monitor.py).
+        # One alert per event, severities set by the detector.
+        if not flagged and event_type == "usb_first_seen":
+            label = detail.get("label", "unknown device") if isinstance(detail, dict) else "unknown device"
+            alert("medium", f"First-seen USB device for user: {label}")
+            flagged = True
+
+        if not flagged and event_type == "usb_unauthorized":
+            label = detail.get("label", "unknown device") if isinstance(detail, dict) else "unknown device"
+            alert("high", f"USB device not on allowlist: {label}")
+            flagged = True
+
+        if not flagged and event_type == "usb_hid_spoof_suspected":
+            alert("high", "Possible BadUSB HID spoofing (heuristic); verify the device physically")
+            flagged = True
+
+        if not flagged and event_type == "usb_offhours_mount":
+            label = detail.get("label", "unknown device") if isinstance(detail, dict) else "unknown device"
+            alert("medium", f"Mass-storage mount outside work hours: {label}")
             flagged = True
 
         if not flagged and event_type == "file_write_burst":

@@ -9,7 +9,7 @@ init_db() for the table to be created.
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models import Base
@@ -40,6 +40,9 @@ class ActivityLog(Base):
     # Heuristic workload-tension score 0-100 computed by the workstation
     # agent. This is a workload signal, not a medical measure.
     strain_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # ML behavioral stress score 0-100 from agent/ml_stress.py (round 4).
+    # Populated only when the agent runs with WAMSS_STRAIN_PIPELINE=1.
+    ml_stress_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
