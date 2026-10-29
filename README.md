@@ -104,6 +104,20 @@ curl "http://localhost:8000/events?limit=5"
 
 The restricted-zone event should return `REVIEW_REQUIRED` with `RESTRICTED_ZONE_DETECTED`.
 
+### 7. Demo without hardware (optional)
+
+No cameras or workstation agents needed. Seed the running backend with
+realistic simulated telemetry, then explore the full dashboard:
+
+```bash
+python3 shared/simulate.py --dry-run   # preview, sends nothing
+python3 shared/simulate.py             # seed 5 employees x 7 workdays
+```
+
+Point the dashboard at the same API (`VITE_API_URL` in `frontend/.env`).
+Build a Monday summary from the seeded data with
+`python3 backend/scripts/weekly_digest.py`. See `shared/README.md`.
+
 ---
 
 ## Architecture

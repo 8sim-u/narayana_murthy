@@ -59,7 +59,55 @@ The strain/focus scores are heuristic workload signals, not medical measures.
 **Employee notice and consent:** deployments of the workstation agent must
 include employee notice and consent per applicable workplace law.
 
+## Round 2 (2026-10-30): remaining completable work
+
+- **Weekly digest live-data fetcher**: `backend/scripts/weekly_digest.py` now
+  pulls real data for the non-demo path with the standard library only
+  (urllib): `GET /activity`, `/activity/strain-summary`, `/focus/daily`,
+  `/focus/streaks`, `/policy/violations`, `/security/alerts`, and
+  `/presence`. New env vars `WAMSS_API_URL` (default
+  http://localhost:8000) and `WAMSS_DIGEST_LOOKBACK_HOURS` (default 168),
+  plus `--api-url` / `--lookback-hours` flags. Per-employee endpoint
+  failures are best-effort; team-level failures exit 2 with a clear
+  message. A new Security alerts section was added to the digest
+  (plain + HTML), backward compatible. The direct-script entry point now
+  runs `main()` (live data) instead of forcing `--demo`. Verified: 9
+  digest tests pass (4 original + 5 new, HTTP layer mocked), plus a live
+  end-to-end run against seeded data (focus scores, policy flags, and USB
+  alerts all rendered). `--send` failure exits 1 with the SMTP error.
+- **Simulation harness**: `shared/simulate.py` (stdlib only) seeds a
+  running backend with realistic telemetry: `POST /event` (varied
+  cameras/zones/confidence), `POST /activity` (batched records with apps,
+  windows, input counts, idle periods, strain scores), and
+  `POST /security/events` (USB, file-write bursts, after-hours). Flags:
+  `--employees`, `--days`, `--api-url`, `--seed`, `--vision-per-day`,
+  `--dry-run`. Verified: dry run plus a real seed (2 employees x 2 days,
+  80 vision events, 88 activity records, 2 security events) against a live
+  test backend, then the live digest read the seeded data back.
+  Documented in `shared/README.md` and the root README demo section.
+- **CI**: `.github/workflows/ci.yml` runs backend pytest on push/PR to
+  main (Python 3.12, pip install from `backend/requirements.txt`).
+
+Full backend suite after round 2: **57 passed** (52 + 5 new digest tests).
+
 ## Open items
+
+- Live-camera verification not done (needs real cameras).
+- No authentication on any endpoint. Adding auth is the recommended next
+  step, but it was deliberately left out here: the vision client posts to
+  `/event` with a fixed contract, and auth would need a coordinated change
+  on both sides plus a key-distribution decision, which is a product call.
+- No database migrations (CI is now in place).
+- DB credential rotation still owed (no access to the credential store).
+- BLE pairing, SMTP credentials, and zone-to-machine mapping need the
+  user's real machine setup (documented in `agent/README.md` and the
+  `.env.example` files).
+- Windows WMI/USB/pywin32 paths and real USB hardware events untested on
+  Linux.
+- `vision/bridge.py` is deprecated in the README but kept; deleting it is
+  a product decision for the repo owner.
+
+## Open items from round 1 (kept)
 
 - Live-camera verification not done.
 - No authentication on any endpoint.

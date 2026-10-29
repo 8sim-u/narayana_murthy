@@ -23,13 +23,34 @@ Delivery is via the CLI: ``--dry-run`` (default) prints to stdout;
 SMTP settings come from CLI flags or environment variables
 WAMSS_SMTP_HOST, WAMSS_SMTP_PORT, WAMSS_SMTP_USER, WAMSS_SMTP_PASS,
 WAMSS_SMTP_FROM, WAMSS_SMTP_TO. Values shown in help are placeholders only.
+
+Live data (the non-demo path) is pulled from the running WAMSS API with the
+standard library only (urllib):
+
+* GET /activity?limit=1000&start_time=<ISO>   activity rows (lookback window)
+* GET /activity/strain-summary                strain levels per employee
+* GET /focus/daily?employee_id=..&date=..     daily focus score + break compliance
+* GET /focus/streaks?employee_id=..           streak days
+* GET /policy/violations?employee_id=..&date=..  policy flags for today
+* GET /security/alerts?hours=..               security anomalies
+* GET /presence                               camera/computer presence states
+
+API connection settings come from CLI flags or environment variables
+WAMSS_API_URL (default http://localhost:8000) and WAMSS_DIGEST_LOOKBACK_HOURS
+(default 168, one week). No credentials are stored in this file.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import smtplib
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import Dict, List, Optional, Tuple
 
@@ -53,11 +74,14 @@ def build_digest(
     strain_rows: List[Dict],
     policy_flags: List[Dict],
     presence_rows: List[Dict],
+    security_alerts: Optional[List[Dict]] = None,
 ) -> Tuple[str, str]:
     """Build the weekly digest.
 
     Returns (plain_text, html) summaries. All stats are defensive: empty input
-    lists yield "no data" sections rather than errors.
+    lists yield "no data" sections rather than errors. ``security_alerts`` is
+    optional so older callers keep working; rows look like
+    {"employee_id": str, "severity": str, "event_type": str, "reason": str}.
     """
     employees: set = set()
     for row in activity_rows + focus_rows + strain_rows + presence_rows:
@@ -165,6 +189,18 @@ def build_digest(
     else:
         lines.append("  none detected")
 
+    lines += ["", "Security alerts:"]
+    alerts = security_alerts or []
+    if alerts:
+        for a in alerts:
+            sev = str(a.get("severity", "low")).upper()
+            lines.append(
+                f"  - {a.get('employee_id', '?')}: [{sev}] "
+                f"{a.get('event_type', '?')} - {a.get('reason', '')}"
+            )
+    else:
+        lines.append("  none raised")
+
     plain = "\n".join(lines) + "\n"
 
     # =============== HTML ===============
@@ -194,6 +230,13 @@ def build_digest(
         for r in anomalies
     ) or "<li>none detected</li>"
 
+    sec_html = "".join(
+        f"<li><strong>{a.get('employee_id', '?')}</strong> "
+        f"[{str(a.get('severity', 'low')).upper()}] {a.get('event_type', '?')} - "
+        f"{a.get('reason', '')}</li>"
+        for a in (security_alerts or [])
+    ) or "<li>none raised</li>"
+
     html = (
         "<html><body style=\"font-family:sans-serif;max-width:700px;margin:auto;\">\n"
         "<h1>WAMSS Weekly Team Digest</h1>\n"
@@ -213,9 +256,152 @@ def build_digest(
         f"{rows_html}\n</table>\n"
         "<h2>Policy flags</h2>\n<ul>\n" + flags_html + "\n</ul>\n"
         "<h2>Presence anomalies</h2>\n<ul>\n" + anomalies_html + "\n</ul>\n"
+        "<h2>Security alerts</h2>\n<ul>\n" + sec_html + "\n</ul>\n"
         "</body></html>"
     )
     return plain, html
+
+
+# ---------------------------------------------------------------- live data fetch
+
+
+class DigestFetchError(RuntimeError):
+    """Raised when live data cannot be pulled from the WAMSS API."""
+
+
+def _get_json(url: str, timeout: float = 15.0):
+    """GET a JSON document from the API. Stdlib only (urllib)."""
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise DigestFetchError(f"GET {url} failed: {exc}") from exc
+
+
+def fetch_live_data(
+    api_url: str,
+    lookback_hours: int = 168,
+    timeout: float = 15.0,
+) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], List[Dict]]:
+    """Pull live rows from the running WAMSS API.
+
+    Returns the same five row lists ``build_digest`` expects, plus a sixth
+    ``security_alerts`` list. A per-endpoint failure for an individual
+    employee does not abort the whole fetch; a failure of a team-level
+    endpoint (activity, strain summary, security, presence) raises
+    ``DigestFetchError``.
+    """
+    api = api_url.rstrip("/")
+    now = datetime.now(timezone.utc)
+    since = urllib.parse.quote((now - timedelta(hours=lookback_hours)).isoformat())
+    today = now.date().isoformat()
+
+    # ---- activity rows (team level; defines the employee list)
+    activity = _get_json(
+        f"{api}/activity?limit=1000&start_time={since}", timeout=timeout
+    )
+    activity_rows = [
+        {
+            "employee_id": r.get("employee_id"),
+            "is_idle": bool(r.get("is_idle")),
+            "keystrokes": r.get("keystrokes", 0),
+            "mouse_clicks": r.get("mouse_clicks", 0),
+            "strain_score": r.get("strain_score"),
+        }
+        for r in activity
+        if r.get("employee_id")
+    ]
+    employees = sorted({r["employee_id"] for r in activity_rows})
+
+    # ---- strain summary (team level)
+    strain = _get_json(f"{api}/activity/strain-summary", timeout=timeout)
+    strain_rows = [
+        {
+            "employee_id": s.get("employee_id"),
+            "strain_level": s.get("strain_level", "unknown"),
+            "strain_score": s.get("strain_score"),
+        }
+        for s in strain
+        if s.get("employee_id")
+    ]
+
+    # ---- per-employee focus, streaks, policy flags (best effort each)
+    focus_rows: List[Dict] = []
+    policy_flags: List[Dict] = []
+    for eid in employees:
+        enc = urllib.parse.quote(eid)
+        row = {"employee_id": eid, "focus_score": None,
+               "break_compliant": False, "streak_days": 0}
+        try:
+            daily = _get_json(
+                f"{api}/focus/daily?employee_id={enc}&date={today}", timeout=timeout
+            )
+            row["focus_score"] = daily.get("focus_score")
+            row["break_compliant"] = bool(
+                (daily.get("break_compliance") or {}).get("compliant", False)
+            )
+        except DigestFetchError:
+            pass
+        try:
+            streaks = _get_json(f"{api}/focus/streaks?employee_id={enc}", timeout=timeout)
+            row["streak_days"] = int(streaks.get("focus_streak_days", 0))
+        except DigestFetchError:
+            pass
+        focus_rows.append(row)
+        try:
+            viol = _get_json(
+                f"{api}/policy/violations?employee_id={enc}&date={today}", timeout=timeout
+            )
+            for v in viol.get("violations", []):
+                policy_flags.append(
+                    {
+                        "employee_id": eid,
+                        "flag": v.get("policy", "UNKNOWN"),
+                        "detail": v.get("detail", ""),
+                    }
+                )
+        except DigestFetchError:
+            pass
+
+    # ---- security alerts (team level)
+    alerts = _get_json(f"{api}/security/alerts?hours={lookback_hours}", timeout=timeout)
+    security_alerts = [
+        {
+            "employee_id": a.get("employee_id", "?"),
+            "severity": a.get("severity", "low"),
+            "event_type": a.get("event_type", "?"),
+            "reason": a.get("reason", ""),
+            "timestamp": a.get("timestamp", ""),
+        }
+        for a in alerts
+    ]
+
+    # ---- presence (team level)
+    presence = _get_json(f"{api}/presence", timeout=timeout)
+    presence_rows = []
+    for p in presence:
+        state = str(p.get("state", ""))
+        if state in ("PRESENT_AND_ACTIVE", "PRESENT_BUT_IDLE"):
+            status = "present"
+        elif state == "ABSENT":
+            status = "absent"
+        else:
+            status = "unknown"
+        anomaly = (
+            "ACTIVE_BUT_ABSENT: workstation active with nobody seen"
+            if p.get("anomaly")
+            else None
+        )
+        presence_rows.append(
+            {
+                "employee_id": p.get("employee_id") or p.get("machine_id", "?"),
+                "status": status,
+                "anomaly": anomaly,
+            }
+        )
+
+    return activity_rows, focus_rows, strain_rows, policy_flags, presence_rows, security_alerts
 
 
 # ---------------------------------------------------------------- demo data
@@ -316,6 +502,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Comma-separated recipients (or WAMSS_SMTP_TO). Example: team@example.com")
     p.add_argument("--no-tls", action="store_true",
                    help="Do not use STARTTLS.")
+    p.add_argument("--api-url", default=None,
+                   help="WAMSS API base URL (or WAMSS_API_URL). "
+                        "Default: http://localhost:8000")
+    p.add_argument("--lookback-hours", type=int, default=None,
+                   help="Hours of history to pull for the live digest "
+                        "(or WAMSS_DIGEST_LOOKBACK_HOURS). Default: 168")
     return p.parse_args(argv)
 
 
@@ -323,10 +515,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
     if args.demo:
-        data = demo_data()
+        data = demo_data() + ([],)
     else:
-        # No live backend fetch is wired here; callers can extend this branch.
-        data = ([], [], [], [], [])
+        api_url = _resolve_env(args.api_url, "WAMSS_API_URL", "http://localhost:8000")
+        lookback = int(_resolve_env(args.lookback_hours,
+                                    "WAMSS_DIGEST_LOOKBACK_HOURS", "168"))
+        try:
+            data = fetch_live_data(api_url, lookback_hours=lookback)
+        except DigestFetchError as exc:
+            print(f"Live fetch failed: {exc}", file=sys.stderr)
+            print("Is the API running? Start it with: "
+                  "python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000",
+                  file=sys.stderr)
+            return 2
 
     plain, html = build_digest(*data)
 
@@ -356,5 +557,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    # Demo: build a digest from synthetic data in dry-run mode.
-    raise SystemExit(main(["--demo"]))
+    # CLI entry point: live data by default, --demo for synthetic data,
+    # --dry-run (default) to print, --send to email via SMTP.
+    raise SystemExit(main())
