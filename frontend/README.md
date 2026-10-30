@@ -11,7 +11,7 @@ and Surveillance System) backend at `../backend`.
 ## Setup
 
 ```sh
-cp .env.example .env   # optional; VITE_API_URL already defaults to http://localhost:8000
+cp .env.example .env   # optional; only needed to point local dev at a backend
 npm install
 npm run dev
 ```
@@ -21,13 +21,15 @@ Then open the URL printed by Vite (default `http://localhost:5173`).
 ## Configuration
 
 The backend base URL is read from `VITE_API_URL` (a Vite build-time env var).
-Copy `.env.example` to `.env` and edit it to point at a different backend:
 
-```sh
-VITE_API_URL=http://localhost:8000
-```
+- **Local dev** (`npm run dev`): set `VITE_API_URL=http://localhost:8000`
+  (see `.env.example`) so the dev server talks to your local backend.
+- **Docker deployment**: leave `VITE_API_URL` empty (the default). The
+  dashboard then calls the same-origin path `/api/*`, which the bundled
+  nginx reverse-proxies to the backend with the API key attached
+  server-side. See `nginx.conf.template` and `../docs/AUTH.md`.
 
-If `VITE_API_URL` is unset, the app defaults to `http://localhost:8000`.
+If `VITE_API_URL` is unset, the app defaults to the same-origin `/api` path.
 
 ## Build
 

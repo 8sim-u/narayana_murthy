@@ -314,8 +314,10 @@ with `[FAIL] port ... is already in use`. Find the culprit
 (`ss -tlnp | grep 8000` on Linux; `netstat -ano | findstr 8000` on Windows),
 stop it, or change the host side of the port mapping in
 `docker-compose.yml` (e.g. `"8081:80"` for the dashboard). If you remap the
-backend port, the dashboard's `VITE_API_URL` must match the new port and the
-frontend needs a rebuild (`docker compose build frontend`).
+backend port, the dashboard is unaffected: it reaches the backend through the
+same-origin `/api/` proxy inside the compose network, not through the host
+port. (Only a `VITE_API_URL` build-arg override would need to match a new
+port, plus a frontend rebuild.)
 
 **Missing `.env` / "DATABASE_URL is required".** `deploy.sh` creates `.env`
 automatically on first run. If you see this error anyway, your `.env` was
@@ -337,10 +339,13 @@ Bluetooth on the host), pair the device per step 5, and set
 most common cause is an unreachable `DATABASE_URL` (typo in the Postgres URL,
 or the postgres service not started with `--profile postgres`).
 
-**Dashboard loads but shows no data.** The frontend was built with the wrong
-`VITE_API_URL` (it is baked in at build time; it must be a URL the *browser*
-can reach). Fix `.env`, then `docker compose build frontend` and re-run
-`deploy.sh`.
+**Dashboard loads but shows no data.** The dashboard calls the same-origin
+`/api/*` path, which the frontend nginx proxies to the backend with the API
+key attached server-side. Check `docker compose logs frontend` for proxy
+errors and re-run `deploy.sh` (or `docker compose up -d`) so the frontend
+container picks up the current compose file. (Only a `VITE_API_URL` build-arg
+override makes the browser call the backend directly; that URL must be
+browser-reachable, and key auth will 401 without a proxy.)
 
 **Agent installs but nothing syncs.** Check the spool file for fresh records
 (`spool/pending.jsonl` in the install dir). If records spool but never

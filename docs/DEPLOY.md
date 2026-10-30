@@ -29,7 +29,7 @@ Every default below is the value used when the variable is unset.
 |---|---|---|---|
 | `DATABASE_URL` | backend | `sqlite:////app/data/wamss.db` | SQLAlchemy database URL. SQLite file inside the `backend-data` volume, or a Postgres URL (see below). Required: the backend refuses to boot without it. |
 | `WAMSS_API_KEY` | backend | (empty) | When set, every backend request must send the `X-API-Key` header. When empty, authentication stays disabled (development default). |
-| `VITE_API_URL` | frontend | `http://localhost:8000` | Backend base URL baked into the dashboard at build time. This is the URL the *browser* calls, so use a host the browser can reach. |
+| `VITE_API_URL` | frontend | (empty) | Backend base URL baked into the dashboard at build time. Empty (default) means same-origin: the dashboard calls the relative path `/api/*`, which the frontend nginx reverse-proxies to the backend with the API key attached server-side. Set it only to point the dashboard at a remote backend directly; that URL is what the *browser* calls, so it must be browser-reachable, and authenticated endpoints will 401 without a proxy attaching the key. |
 | `POSTGRES_USER` | postgres | `wamss` | Postgres superuser created on first boot (postgres profile only). |
 | `POSTGRES_PASSWORD` | postgres | `changeme` | Password for `POSTGRES_USER`. Change this before any shared deployment. |
 | `POSTGRES_DB` | postgres | `wamss` | Database created on first boot (postgres profile only). |
@@ -37,11 +37,14 @@ Every default below is the value used when the variable is unset.
 Notes:
 
 - `VITE_API_URL` is a build arg, not a runtime setting. Changing it requires
-  `docker compose build frontend` (or `up --build`). If the dashboard shows
-  connection errors, rebuild the frontend with the correct URL.
-- When `WAMSS_API_KEY` is set, the simulator and any other client must send the
-  key (see "Simulator" below) and the dashboard's test-event form needs the
-  header added by the operator.
+  `docker compose build frontend` (or `up --build`). Leave it empty (default):
+  the dashboard then uses the same-origin `/api/*` proxy, which also solves
+  API key auth for the browser (the key is attached server-side by nginx).
+  If the dashboard shows connection errors, check that the frontend container
+  was rebuilt after any `VITE_API_URL` change.
+- When `WAMSS_API_KEY` is set, the simulator and any other direct client must
+  send the key (see "Simulator" below). The dashboard needs no manual header:
+  the nginx `/api/` proxy attaches it (see docs/AUTH.md).
 - Never commit `.env` (it is gitignored). `.env.example` holds placeholders only.
 
 ## SQLite vs Postgres
@@ -111,8 +114,13 @@ when Python code changes.
 
 - `docker compose up` fails with "DATABASE_URL is required": your `.env` file
   is missing and interpolation fell through. `cp .env.example .env` and retry.
-- Dashboard loads but shows no data / connection errors: the frontend was built
-  with the wrong `VITE_API_URL`. Rebuild: `docker compose build frontend`.
+- Dashboard loads but shows no data / connection errors: the browser calls
+  the relative path `/api/*`, which the frontend nginx proxies to the
+  backend. Check `docker compose logs frontend` for proxy errors and make
+  sure the frontend container was recreated after the last compose change
+  (`docker compose up -d`). Only if you overrode `VITE_API_URL` at build
+  time does the browser call the backend directly; then the URL must be
+  browser-reachable and key auth will 401 without a proxy.
 - Port already in use (8000 or 8080): stop the conflicting process, or change
   the host side of the port mapping in `docker-compose.yml`
   (e.g. `"8081:80"`).

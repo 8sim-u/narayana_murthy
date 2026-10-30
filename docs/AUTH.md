@@ -79,6 +79,21 @@ Each client sends the header only when a key is configured:
 
 `agent/usb_monitor.py` makes no HTTP calls to the backend, so it needs no key.
 
+## Dashboard access
+
+The React dashboard in `frontend/` talks to the backend from a browser, so it
+cannot hold the shared secret itself. The composed deployment solves this with
+a same-origin reverse proxy: the frontend nginx container serves the dashboard
+and proxies `/api/*` to the backend, attaching `X-API-Key` from its own
+`WAMSS_API_KEY` environment variable (see `frontend/nginx.conf.template`;
+the key is rendered into the nginx config at container startup by the nginx
+image's envsubst templating, and the browser never sees it). The dashboard
+calls the relative path `/api` by default (`VITE_API_URL` unset), so rotating
+the key needs no rebuild, only `docker compose up -d` to re-render the proxy
+config and restart the backend. Set `VITE_API_URL` at build time only if the
+dashboard must talk to a remote backend directly; in that case the browser
+calls the backend without the header and authenticated endpoints return 401.
+
 ## Implementation notes
 
 - The middleware lives in `backend/app/auth.py` and is registered in
@@ -87,8 +102,6 @@ Each client sends the header only when a key is configured:
   so the key cannot be guessed from response timing.
 - The middleware reads `WAMSS_API_KEY` once at startup. Changing the variable
   on a running backend has no effect until restart.
-- The React dashboard in `frontend/` talks to the backend from a browser; if
-  auth is enabled for a deployment the dashboard operator serves, the
-  dashboard build for that deployment needs a way to attach the header (for
-  example a small API proxy), because a browser client cannot hold a shared
-  secret. Out of scope for this change; see the roadmap doc for follow-ups.
+- The dashboard's API access goes through the frontend nginx `/api/` reverse
+  proxy, which attaches the header server-side (see "Dashboard access"
+  above).

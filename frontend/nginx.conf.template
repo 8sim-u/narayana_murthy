@@ -1,0 +1,48 @@
+# WAMSS dashboard: static SPA + same-origin /api/ reverse proxy.
+#
+# This is a TEMPLATE processed at container startup by the official nginx
+# image entrypoint (envsubst over /etc/nginx/templates/*.template).
+# Only ${WAMSS_API_KEY} is substituted. nginx variables such as $host,
+# $uri or $remote_addr are left untouched because they are not environment
+# variables (the entrypoint substitutes exactly the defined env vars).
+#
+# Why the proxy exists: the dashboard runs in a browser and must never see
+# the deployment's shared API key. nginx attaches X-API-Key server-side from
+# its own WAMSS_API_KEY environment variable (see docker-compose.yml and
+# docs/AUTH.md). When the variable is empty the header goes out empty and the
+# backend, with auth disabled, ignores it -- matching local-dev behavior.
+# WAMSS_API_KEY is base64url (A-Za-z0-9-_), always safe to inline here.
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Same-origin API proxy: the dashboard calls /api/*, nginx forwards to
+    # the backend service and injects the API key. The browser never sees it.
+    location /api/ {
+        proxy_pass http://backend:8000/;
+        proxy_set_header X-API-Key "${WAMSS_API_KEY}";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 30s;
+    }
+
+    # Normalize bare /api to /api/ so relative fetches keep working.
+    location = /api {
+        return 301 /api/;
+    }
+
+    # SPA fallback: client-side routes resolve to index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Long cache for hashed Vite build assets.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}

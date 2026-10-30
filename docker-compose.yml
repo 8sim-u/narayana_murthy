@@ -33,9 +33,13 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_API_URL: ${VITE_API_URL:-}
     ports:
       - "8080:80"
+    environment:
+      # Key the nginx /api/ proxy attaches server-side (docs/AUTH.md).
+      # The browser never sees it. Empty when auth is disabled.
+      WAMSS_API_KEY: ${WAMSS_API_KEY:-}
     depends_on:
       backend:
         condition: service_healthy
