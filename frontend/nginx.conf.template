@@ -2,9 +2,10 @@
 #
 # This is a TEMPLATE processed at container startup by the official nginx
 # image entrypoint (envsubst over /etc/nginx/templates/*.template).
-# Only ${WAMSS_API_KEY} is substituted. nginx variables such as $host,
-# $uri or $remote_addr are left untouched because they are not environment
-# variables (the entrypoint substitutes exactly the defined env vars).
+# Only the WAMSS_API_KEY variable is substituted below. nginx variables such
+# as $host, $uri or $remote_addr are left untouched because they are not
+# environment variables (the entrypoint substitutes exactly the defined
+# env vars).
 #
 # Why the proxy exists: the dashboard runs in a browser and must never see
 # the deployment's shared API key. nginx attaches X-API-Key server-side from
