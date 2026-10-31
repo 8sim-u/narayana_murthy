@@ -56,7 +56,7 @@ def _load_cameras():
             data = json.loads(raw)
             if isinstance(data, dict) and data:
                 print(f"[config] Cameras from WAMSS_CAMERAS: {sorted(data)}")
-                return dict(data)
+                return _normalize_cameras(dict(data))
             print("[config] WARNING: WAMSS_CAMERAS is empty or not an "
                   "object, falling back to numbered vars")
         except json.JSONDecodeError as exc:
@@ -70,12 +70,29 @@ def _load_cameras():
             numbered[f"CAM_{match.group(1)}"] = value.strip()
     if numbered:
         print(f"[config] Cameras from numbered vars: {sorted(numbered)}")
-        return numbered
+        return _normalize_cameras(numbered)
 
     print("[config] WARNING: no cameras configured; using SAMPLE-ONLY "
           "placeholder URLs (192.0.2.x documentation addresses). Set "
           "WAMSS_CAMERAS or WAMSS_CAM_<id>_URL to run for real.")
     return dict(SAMPLE_CAMERAS)
+
+
+def _normalize_cameras(cameras):
+    """Convert all-digit camera URLs to int device indices.
+
+    cv2.VideoCapture("0") opens the literal file "0"; only the int form
+    cv2.VideoCapture(0) addresses a local camera device. Accepting "0",
+    "1", ... in WAMSS_CAMERAS lets a laptop's built-in webcam be used as
+    e.g. WAMSS_CAMERAS='{"CAM_01":"0"}' without a wrapper script.
+    """
+    normalized = {}
+    for cam_id, url in cameras.items():
+        if isinstance(url, str) and url.strip().isdigit():
+            normalized[cam_id] = int(url.strip())
+        else:
+            normalized[cam_id] = url
+    return normalized
 
 
 # SAMPLE ONLY: placeholder URLs using RFC 5737 TEST-NET-1 documentation
