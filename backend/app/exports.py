@@ -235,7 +235,7 @@ def export_focus_csv(
     (default: the last 7 days ending today) so the export contains a full week.
     Scores are computed with the same app.focus.daily_focus logic as /focus/daily.
     """
-    end = end_date or date.today()
+    end = end_date or datetime.now(timezone.utc).date()
     start = start_date or (end - timedelta(days=6))
     if start > end:
         raise HTTPException(

@@ -17,6 +17,36 @@ import cv2
 from ultralytics import YOLO
 
 try:
+    from vision.workstation_objects import (
+        CLASS_NAME_MAP,
+        load_workstation_object_config,
+    )
+    from vision.association import (
+        AssociationStatus,
+        DetectedObject,
+        PersonObjectAssociator,
+        TrackedPerson,
+    )
+    from vision.activity_metrics import WorkstationActivityTracker
+    from vision.hud import render_workstation_overlay
+except ImportError:
+    try:
+        from workstation_objects import (
+            CLASS_NAME_MAP,
+            load_workstation_object_config,
+        )
+        from association import (
+            AssociationStatus,
+            DetectedObject,
+            PersonObjectAssociator,
+            TrackedPerson,
+        )
+        from activity_metrics import WorkstationActivityTracker
+        from hud import render_workstation_overlay
+    except ImportError:
+        pass
+
+try:
     # MediaPipe is OPTIONAL. It powers privacy-mode presence/pose (on-device)
     # and face blurring for anonymized snapshots. When absent, privacy mode
     # falls back to the YOLO aggregate path and refuses to store any frame.
@@ -24,6 +54,43 @@ try:
     import mediapipe as mp
 except ImportError:
     mp = None
+
+
+def _parse_and_set_env(env_path):
+    """Parse a simple key=value .env file and set in os.environ without overriding."""
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as exc:
+        print(f"[config] WARNING: could not read {env_path}: {exc}")
+
+
+def _load_env_files():
+    """Load .env files from project root, script directory, or current directory."""
+    candidates = [
+        os.path.join(os.path.dirname(__file__), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    seen = set()
+    for path in candidates:
+        norm = os.path.normpath(os.path.abspath(path))
+        if norm not in seen and os.path.isfile(norm):
+            seen.add(norm)
+            _parse_and_set_env(norm)
+
+
+_load_env_files()
 
 
 def _parse_bool(value, default):
@@ -48,7 +115,8 @@ def _load_cameras():
     1. WAMSS_CAMERAS: a JSON object mapping camera id to stream URL, e.g.
        WAMSS_CAMERAS='{"CAM_01":"http://10.0.0.5:8080/video"}'
     2. Numbered vars: WAMSS_CAM_<id>_URL, e.g. WAMSS_CAM_01_URL=...
-    3. SAMPLE_CAMERAS: placeholder URLs only (never real cameras).
+    3. Shorthand var: WAMSS_CAMERA_URL, e.g. WAMSS_CAMERA_URL=http://127.0.0.1:8080/video
+    4. SAMPLE_CAMERAS: placeholder URLs only (never real cameras).
     """
     raw = os.environ.get("WAMSS_CAMERAS")
     if raw:
@@ -72,6 +140,11 @@ def _load_cameras():
         print(f"[config] Cameras from numbered vars: {sorted(numbered)}")
         return _normalize_cameras(numbered)
 
+    shorthand = os.environ.get("WAMSS_CAMERA_URL")
+    if shorthand and shorthand.strip():
+        print(f"[config] Camera from WAMSS_CAMERA_URL: CAM_01 -> {shorthand.strip()}")
+        return _normalize_cameras({"CAM_01": shorthand.strip()})
+
     print("[config] WARNING: no cameras configured; using SAMPLE-ONLY "
           "placeholder URLs (192.0.2.x documentation addresses). Set "
           "WAMSS_CAMERAS or WAMSS_CAM_<id>_URL to run for real.")
@@ -79,7 +152,7 @@ def _load_cameras():
 
 
 def _normalize_cameras(cameras):
-    """Convert all-digit camera URLs to int device indices.
+    """Convert all-digit camera URLs to int device indices and strip whitespace.
 
     cv2.VideoCapture("0") opens the literal file "0"; only the int form
     cv2.VideoCapture(0) addresses a local camera device. Accepting "0",
@@ -88,8 +161,9 @@ def _normalize_cameras(cameras):
     """
     normalized = {}
     for cam_id, url in cameras.items():
-        if isinstance(url, str) and url.strip().isdigit():
-            normalized[cam_id] = int(url.strip())
+        if isinstance(url, str):
+            clean = url.strip()
+            normalized[cam_id] = int(clean) if clean.isdigit() else clean
         else:
             normalized[cam_id] = url
     return normalized
@@ -107,6 +181,9 @@ SAMPLE_CAMERAS = {
 CAMERAS = _load_cameras()
 
 MODEL_PATH = os.environ.get("WAMSS_MODEL_PATH", "yolov8n.pt")
+
+# Detection confidence threshold (default: 0.45)
+CONF_THRESHOLD = _parse_float(os.environ.get("WAMSS_CONF_THRESHOLD"), 0.45)
 
 # The real backend /event endpoint (NOT the deprecated standalone bridge).
 BACKEND_URL = os.environ.get("WAMSS_BACKEND_URL", "http://localhost:8000/event")
@@ -313,7 +390,7 @@ class PrivacyDetector:
             count = len(face_res.detections) if face_res.detections else 0
             pose = self._coarse_pose(rgb) if count > 0 else "unknown"
             return count, pose
-        results = self._yolo(frame, classes=[0], conf=0.45, verbose=False)
+        results = self._yolo(frame, classes=[0], conf=CONF_THRESHOLD, verbose=False)
         boxes = results[0].boxes
         return (len(boxes) if boxes is not None else 0), "unknown"
 
@@ -350,104 +427,187 @@ def build_privacy_event(camera_id, person_count, coarse_pose, occupied):
     }
 
 
-def run_camera(camera_id, stream_url):
+def run_camera(camera_id, stream_url, stop_event=None):
     model = YOLO(MODEL_PATH)
+    cfg = load_workstation_object_config()
+    obj_conf = cfg["object_conf"]
+    target_classes = cfg["target_classes"]
+    obj_target_classes = [c for c in target_classes if c != 0]
+
+    associator = PersonObjectAssociator()
+    activity_tracker = WorkstationActivityTracker()
+
     cap = cv2.VideoCapture(stream_url)
     last_event_time = 0.0
     last_summary_time = 0.0
+    consecutive_failures = 0
+    max_consecutive_failures = 10
+    reconnect_delay = 2.0
+
+    while not cap.isOpened() and not (stop_event and stop_event.is_set()):
+        print(f"[{camera_id}] WARNING: Cannot open camera stream ({stream_url}); retrying in {reconnect_delay}s...")
+        time.sleep(reconnect_delay)
+        cap.release()
+        cap = cv2.VideoCapture(stream_url)
 
     if not cap.isOpened():
-        print(f"[{camera_id}] ERROR: Cannot open camera stream")
+        print(f"[{camera_id}] ERROR: Camera stream could not be opened")
+        cap.release()
         return
 
     print(f"[{camera_id}] Camera connected (headless={HEADLESS})")
 
     try:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             success, frame = cap.read()
 
-            if not success:
-                print(f"[{camera_id}] No frame received")
-                time.sleep(0.2)
+            if not success or frame is None or getattr(frame, "size", 0) == 0:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"[{camera_id}] WARNING: Stream interrupted ({consecutive_failures} failed reads); reconnecting...")
+                    cap.release()
+                    time.sleep(reconnect_delay)
+                    cap = cv2.VideoCapture(stream_url)
+                    if cap.isOpened():
+                        print(f"[{camera_id}] Camera reconnected successfully")
+                        consecutive_failures = 0
+                    else:
+                        print(f"[{camera_id}] Reconnection attempt failed; will retry...")
+                else:
+                    if consecutive_failures == 1:
+                        print(f"[{camera_id}] No frame received")
+                    time.sleep(0.1)
                 continue
+
+            consecutive_failures = 0
 
             results = model.track(
                 source=frame,
                 persist=True,
                 tracker="bytetrack.yaml",
                 classes=[0],
-                conf=0.45,
+                conf=CONF_THRESHOLD,
                 verbose=False,
             )
 
-            boxes = results[0].boxes
+            person_boxes = results[0].boxes
             now = time.time()
 
-            person_count = len(boxes) if boxes is not None else 0
+            person_count = len(person_boxes) if person_boxes is not None else 0
+            persons = []
+            if person_count > 0:
+                for idx in range(person_count):
+                    track_id = (
+                        str(int(person_boxes.id[idx].item()))
+                        if (person_boxes.id is not None and idx < len(person_boxes.id))
+                        else f"p{idx}"
+                    )
+                    conf = (
+                        float(person_boxes.conf[idx].item())
+                        if (person_boxes.conf is not None and idx < len(person_boxes.conf))
+                        else 0.0
+                    )
+                    xyxy = [float(v) for v in person_boxes.xyxy[idx].tolist()]
+                    persons.append(TrackedPerson(track_id=track_id, box=xyxy, conf=conf))
 
-            # Send an event when a person is detected
+            # Detect workstation objects (laptops, phones, keyboards, mice, monitors, books)
+            objects = []
+            if obj_target_classes:
+                obj_results = model.predict(
+                    source=frame,
+                    classes=obj_target_classes,
+                    conf=obj_conf,
+                    verbose=False,
+                )
+                obj_boxes = obj_results[0].boxes
+                if obj_boxes is not None and len(obj_boxes) > 0:
+                    for idx in range(len(obj_boxes)):
+                        cid = int(obj_boxes.cls[idx].item())
+                        cname = CLASS_NAME_MAP.get(cid, model.names.get(cid, f"obj_{cid}"))
+                        conf = float(obj_boxes.conf[idx].item())
+                        xyxy = [float(v) for v in obj_boxes.xyxy[idx].tolist()]
+                        objects.append(DetectedObject(class_name=cname, class_id=cid, box=xyxy, conf=conf))
+
+            # Perform spatial and temporal association
+            associations = associator.associate(persons=persons, objects=objects)
+
+            # Update workstation activity and engagement metrics
+            summaries = activity_tracker.update(timestamp=now, persons=persons, associations=associations)
+
+            # Send events to backend when person is detected
             if person_count > 0 and now - last_event_time >= EVENT_INTERVAL:
-                confidences = boxes.conf.cpu().tolist()
+                for p in persons:
+                    track_id = p.track_id
+                    conf = p.conf
 
-                track_id = "unknown"
-                if boxes.id is not None:
-                    track_id = str(int(boxes.id[0].item()))
+                    # Collect associated objects for this person
+                    associated_objs = ["person"]
+                    for a in associations:
+                        if a.assigned_track_id == track_id and a.status in (
+                            AssociationStatus.ASSOCIATED,
+                            AssociationStatus.INTERACTING,
+                            AssociationStatus.NEAR,
+                        ):
+                            if a.object.class_name not in associated_objs:
+                                associated_objs.append(a.object.class_name)
 
-                event = {
-                    "camera_id": camera_id,
-                    "track_id": track_id,
-                    "objects": ["person"],
-                    "confidence": float(max(confidences)),
-                    "zone": "UNKNOWN",
-                }
+                    zone = os.environ.get(f"WAMSS_{camera_id}_ZONE", os.environ.get("WAMSS_DEFAULT_ZONE", "RESTRICTED"))
+                    event = {
+                        "camera_id": camera_id,
+                        "track_id": track_id,
+                        "objects": associated_objs,
+                        "confidence": conf,
+                        "zone": zone,
+                    }
 
-                try:
-                    response = requests.post(
-                        BACKEND_URL,
-                        json=event,
-                        timeout=2.0,
-                        headers=_backend_headers(),
-                    )
-                    response.raise_for_status()
+                    try:
+                        response = requests.post(
+                            BACKEND_URL,
+                            json=event,
+                            timeout=2.0,
+                            headers=_backend_headers(),
+                        )
+                        response.raise_for_status()
 
-                    data = response.json()
-                    print(
-                        f"[{camera_id}] Person detected | "
-                        f"Backend: {data.get('decision', 'UNKNOWN')} | "
-                        f"Track: {track_id}"
-                    )
+                        data = response.json()
+                        p_summary = summaries.get(track_id)
+                        state_val = p_summary.current_state.value if p_summary else "UNKNOWN"
+                        print(
+                            f"[{camera_id}] Person detected | "
+                            f"Backend: {data.get('decision', 'UNKNOWN')} | "
+                            f"Track: {track_id} | Objects: {associated_objs} | State: {state_val}"
+                        )
 
-                except requests.RequestException as exc:
-                    print(f"[{camera_id}] Backend request failed: {exc}")
+                    except requests.RequestException as exc:
+                        print(f"[{camera_id}] Backend request failed: {exc}")
 
                 last_event_time = now
                 last_summary_time = now
 
-            elif HEADLESS and person_count > 0 \
+            elif HEADLESS and (person_count > 0 or len(objects) > 0) \
                     and now - last_summary_time >= HEADLESS_LOG_INTERVAL:
-                # Headless mode: no preview window, so log a short summary
-                # between event sends instead of drawing frames.
-                max_conf = float(max(boxes.conf.cpu().tolist()))
-                print(f"[{camera_id}] Headless summary: {person_count} "
-                      f"person(s) in view, max confidence {max_conf:.2f}")
+                track_ids = [p.track_id for p in persons]
+                obj_names = [o.class_name for o in objects]
+                primary_s = summaries.get(persons[0].track_id) if persons else None
+                state_str = primary_s.current_state.value if primary_s else "NO_PERSON"
+                eng_str = primary_s.engagement_label if primary_s else "N/A"
+                print(
+                    f"[{camera_id}] Headless summary: {person_count} person(s) (tracks: {track_ids}), "
+                    f"objects: {obj_names} | State: {state_str} | {eng_str}"
+                )
                 last_summary_time = now
 
             if HEADLESS:
-                # No display available: keep processing frames without any
-                # window calls.
                 continue
 
-            # Windowed preview (only reached when a display is available)
-            display = results[0].plot()
-
-            cv2.putText(
-                display,
-                camera_id,
-                (15, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 0),
-                2,
+            # Windowed preview with rich HUD and annotations
+            display = render_workstation_overlay(
+                frame=frame,
+                persons=persons,
+                objects=objects,
+                associations=associations,
+                summaries=summaries,
+                camera_id=camera_id,
             )
 
             cv2.imshow(camera_id, display)
@@ -464,7 +624,7 @@ def run_camera(camera_id, stream_url):
             cv2.destroyAllWindows()
 
 
-def run_camera_privacy(camera_id, stream_url):
+def run_camera_privacy(camera_id, stream_url, stop_event=None):
     """Privacy-mode loop: in-memory frames, aggregate events only.
 
     No track ids, no raw frames on disk, no preview windows (a window would
@@ -476,9 +636,19 @@ def run_camera_privacy(camera_id, stream_url):
     debouncer = OccupancyDebouncer(debounce_s=OCCUPANCY_DEBOUNCE_S)
     cap = cv2.VideoCapture(stream_url)
     last_summary_time = 0.0
+    consecutive_failures = 0
+    max_consecutive_failures = 10
+    reconnect_delay = 2.0
+
+    while not cap.isOpened() and not (stop_event and stop_event.is_set()):
+        print(f"[{camera_id}] WARNING: Cannot open camera stream ({stream_url}); retrying in {reconnect_delay}s...")
+        time.sleep(reconnect_delay)
+        cap.release()
+        cap = cv2.VideoCapture(stream_url)
 
     if not cap.isOpened():
-        print(f"[{camera_id}] ERROR: Cannot open camera stream")
+        print(f"[{camera_id}] ERROR: Camera stream could not be opened")
+        cap.release()
         return
 
     print(f"[{camera_id}] Camera connected (privacy mode, "
@@ -486,13 +656,28 @@ def run_camera_privacy(camera_id, stream_url):
           f"debounce={OCCUPANCY_DEBOUNCE_S}s)")
 
     try:
-        while True:
+        while not (stop_event and stop_event.is_set()):
             success, frame = cap.read()
 
-            if not success:
-                print(f"[{camera_id}] No frame received")
-                time.sleep(0.2)
+            if not success or frame is None or getattr(frame, "size", 0) == 0:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print(f"[{camera_id}] WARNING: Stream interrupted ({consecutive_failures} failed reads); reconnecting...")
+                    cap.release()
+                    time.sleep(reconnect_delay)
+                    cap = cv2.VideoCapture(stream_url)
+                    if cap.isOpened():
+                        print(f"[{camera_id}] Camera reconnected successfully")
+                        consecutive_failures = 0
+                    else:
+                        print(f"[{camera_id}] Reconnection attempt failed; will retry...")
+                else:
+                    if consecutive_failures == 1:
+                        print(f"[{camera_id}] No frame received")
+                    time.sleep(0.1)
                 continue
+
+            consecutive_failures = 0
 
             now = time.time()
             person_count, coarse_pose = detector.detect(frame)
@@ -553,13 +738,14 @@ def main():
     print(f"[config] Privacy mode: {PRIVACY_MODE}"
           + (f" (debounce={OCCUPANCY_DEBOUNCE_S}s)" if PRIVACY_MODE else ""))
 
+    stop_event = threading.Event()
     threads = []
 
     for camera_id, stream_url in CAMERAS.items():
         target = run_camera_privacy if PRIVACY_MODE else run_camera
         thread = threading.Thread(
             target=target,
-            args=(camera_id, stream_url),
+            args=(camera_id, stream_url, stop_event),
             daemon=True,
         )
         threads.append(thread)
@@ -572,8 +758,12 @@ def main():
 
     except KeyboardInterrupt:
         print("Stopping WAMSS...")
+        stop_event.set()
 
     finally:
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=1.0)
         if not HEADLESS:
             cv2.destroyAllWindows()
         print("WAMSS stopped")

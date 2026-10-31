@@ -151,7 +151,7 @@ def render_pdf(report: dict, out_path: str) -> None:
 
     def body(text: str):
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 5.5, text)
+        pdf.multi_cell(0, 5.5, text, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)
 
     # 1. Team stats
@@ -199,6 +199,7 @@ def render_pdf(report: dict, out_path: str) -> None:
             pdf.multi_cell(
                 0, 5.5,
                 f"[{f['severity']}] {f['date']} {f['employee_id']}: {f['policy']} - {f['detail']}",
+                new_x="LMARGIN", new_y="NEXT",
             )
         pdf.ln(1)
 

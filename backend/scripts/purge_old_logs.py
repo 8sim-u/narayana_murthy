@@ -57,12 +57,16 @@ def _models_to_purge():
 
     targets = [("activity_logs", ActivityLog, "created_at")]
 
-    # SecurityEvent is a planned table that may not exist yet; purge it too
-    # when it does, so old security data cannot outlive the retention window.
+    # SecurityEvent lives in app.security_models
     try:
-        from app.models import SecurityEvent  # type: ignore[attr-defined]
-    except (ImportError, AttributeError):
-        logger.info("SecurityEvent model not present; skipping that table")
+        from app.security_models import SecurityEvent
+    except ImportError:
+        try:
+            from app.models import SecurityEvent  # type: ignore[attr-defined]
+        except (ImportError, AttributeError):
+            logger.info("SecurityEvent model not present; skipping that table")
+        else:
+            targets.append(("security_events", SecurityEvent, "created_at"))
     else:
         targets.append(("security_events", SecurityEvent, "created_at"))
 
@@ -74,7 +78,11 @@ def purge_older_than(days: int, dry_run: bool = False) -> dict:
     Delete rows older than `days`. Returns {table_label: deleted_count}.
     With dry_run=True only counts and deletes nothing.
     """
-    from app.database import SessionLocal
+    from app.database import SessionLocal, init_db
+    import app.activity_models  # noqa: F401
+    import app.security_models  # noqa: F401
+
+    init_db()
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     results = {}
