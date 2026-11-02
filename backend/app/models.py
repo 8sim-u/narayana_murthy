@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any, List, Optional
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -25,4 +25,33 @@ class DetectionEvent(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         index=True,
+    )
+    # Edge roadmap fields (added 2026-11-02). All nullable so older rows and
+    # older edge payloads keep working.
+    person_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    position_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    position_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    snapshot_path: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    dwell_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class FaceRecord(Base):
+    """Server-side face gallery for person identification.
+
+    One row per enrolled person. ``embedding`` holds the face encoding as a
+    plain list of floats (or null when no face library is available, in which
+    case only the photo is stored and ``face_available`` is False).
+    """
+
+    __tablename__ = "faces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    embedding: Mapped[Optional[List[float]]] = mapped_column(JSON, nullable=True)
+    photo_path: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    face_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    enrolled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )

@@ -239,3 +239,10 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# WAMSS face gallery: enrolled biometric data stays on the edge node,
+# never in the repo (vision/faces/README.md and .gitkeep still ship).
+vision/faces/*.json
+# Backend runtime data: enrolled face photos and detection snapshots.
+# Biometric and operational data; never committed.
+backend/data/

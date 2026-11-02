@@ -4,6 +4,9 @@ import type {
   EventCreate,
   EventResponse,
   HealthStatus,
+  HeatPoint,
+  OccupancyBucket,
+  PersonPosition,
 } from './types';
 
 // Same-origin by default: the dashboard calls the relative path /api/*,
@@ -52,4 +55,33 @@ export async function sendEvent(payload: EventCreate): Promise<EventResponse> {
 
 export function getApiUrl(): string {
   return API_URL;
+}
+
+// Live tracked-person positions for the Room Map tab.
+export async function getPositions(): Promise<PersonPosition[]> {
+  const res = await fetch(`${API_URL}/positions`);
+  return handleResponse<PersonPosition[]>(res);
+}
+
+// Density samples for the Room Map heatmap overlay.
+export async function getHeatmap(cameraId?: string, hours = 24): Promise<HeatPoint[]> {
+  const params = new URLSearchParams({ hours: String(hours) });
+  if (cameraId) {
+    params.set('camera_id', cameraId);
+  }
+  const res = await fetch(`${API_URL}/heatmap?${params.toString()}`);
+  return handleResponse<HeatPoint[]>(res);
+}
+
+// Person counts per time bucket for the occupancy timeline.
+export async function getOccupancy(hours = 24, bucket = '15m'): Promise<OccupancyBucket[]> {
+  const params = new URLSearchParams({ hours: String(hours), bucket });
+  const res = await fetch(`${API_URL}/occupancy?${params.toString()}`);
+  return handleResponse<OccupancyBucket[]>(res);
+}
+
+// Resolve an event snapshot_path to a same-origin URL the browser can load.
+export function snapshotUrl(snapshotPath: string): string {
+  const filename = snapshotPath.split('/').pop() ?? snapshotPath;
+  return `${API_URL}/snapshots/${encodeURIComponent(filename)}`;
 }

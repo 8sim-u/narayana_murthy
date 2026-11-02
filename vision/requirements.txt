@@ -16,6 +16,21 @@ opencv-python>=4.10,<6
 torch>=2.0,<3
 requests>=2.32,<3
 
+# OPTIONAL: face recognition for the non-privacy pipeline
+# (vision/face_id.py). When installed, enrolled faces in vision/faces/ are
+# matched with cosine similarity on ArcFace embeddings (insightface
+# FaceAnalysis, buffalo_l pack; models download on first use).
+#
+# Without it, face_id.py falls back to the OpenCV LBPH recognizer when
+# opencv-contrib-python is installed (cv2.face lives there, NOT in
+# opencv-python); with neither, identify() always returns "unknown" and the
+# pipeline keeps working with names disabled. Face recognition NEVER runs
+# in privacy mode (WAMSS_PRIVACY_MODE=1).
+#
+# Install explicitly on the edge node when face recognition is required:
+#   pip install insightface
+# insightface>=0.7.3
+
 # OPTIONAL: needed only for WAMSS_PRIVACY_MODE=1 (privacy-preserving presence
 # mode in vision/multicamera.py). Provides the on-device MediaPipe backend
 # (face detection for person counting, pose for the coarse standing/sitting

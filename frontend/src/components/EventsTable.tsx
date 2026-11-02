@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import type { DetectionEvent } from '../types';
+import { snapshotUrl } from '../api';
 import { Chip, EmptyState, Meter, SkeletonRows } from './ui';
 
 export function isRestrictedAlert(event: DetectionEvent): boolean {
@@ -15,6 +16,10 @@ function confidenceTone(conf: number): string {
   if (conf >= 0.8) return 'var(--ok)';
   if (conf >= 0.5) return 'var(--warn)';
   return 'var(--bad)';
+}
+
+export function isKnownPerson(name: string | null | undefined): boolean {
+  return !!name && name.trim() !== '' && name.trim().toLowerCase() !== 'unknown';
 }
 
 export default function EventsTable({ events, loading }: { events: DetectionEvent[]; loading: boolean }) {
@@ -45,6 +50,8 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
             <th>Time</th>
             <th>Camera</th>
             <th>Track</th>
+            <th>Person</th>
+            <th>Snapshot</th>
             <th>Objects</th>
             <th>Confidence</th>
             <th>Zone</th>
@@ -65,6 +72,39 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
                 <td className="num">{formatTimestamp(e.timestamp)}</td>
                 <td className="id">{e.camera_id}</td>
                 <td className="id">{e.track_id}</td>
+                <td>
+                  {isKnownPerson(e.person_name) ? (
+                    <Chip tone="signal">{e.person_name}</Chip>
+                  ) : (
+                    <Chip tone="idle">unknown</Chip>
+                  )}
+                </td>
+                <td>
+                  {e.snapshot_path ? (
+                    <a
+                      href={snapshotUrl(e.snapshot_path)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open full snapshot"
+                    >
+                      <img
+                        src={snapshotUrl(e.snapshot_path)}
+                        alt={`Snapshot for event ${e.id}`}
+                        loading="lazy"
+                        style={{
+                          width: 64,
+                          height: 40,
+                          objectFit: 'cover',
+                          borderRadius: 4,
+                          border: '1px solid var(--rule)',
+                          display: 'block',
+                        }}
+                      />
+                    </a>
+                  ) : (
+                    <span style={{ color: 'var(--text-3)' }}>-</span>
+                  )}
+                </td>
                 <td>{e.objects.join(', ')}</td>
                 <td>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>

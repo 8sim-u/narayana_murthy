@@ -26,6 +26,8 @@ from app.schemas import EventCreate, EventDetail, EventResponse
 from app import activity_models  # noqa: F401 - registers ActivityLog
 from app import security_models  # noqa: F401 - registers SecurityEvent
 from app.activity import router as activity_router
+from app.edge import ensure_schema, record_position
+from app.edge import router as edge_router
 from app.focus import router as focus_router
 from app.presence import router as presence_router
 from app.security import router as security_router
@@ -70,6 +72,8 @@ class AccessLogAndErrorHandlerMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     # Initialize database tables on application startup
     init_db()
+    # Additive edge columns for databases created before the edge expansion
+    ensure_schema()
     yield
 
 
@@ -99,6 +103,7 @@ app.add_middleware(
 )
 
 app.include_router(activity_router)
+app.include_router(edge_router)
 app.include_router(focus_router)
 app.include_router(presence_router)
 app.include_router(security_router)
@@ -157,6 +162,11 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
         decision=rule_result.decision,
         alerts=rule_result.alerts,
         timestamp=now_utc,
+        person_name=event_in.person_name,
+        position_x=event_in.position_x,
+        position_y=event_in.position_y,
+        snapshot_path=event_in.snapshot_path,
+        dwell_seconds=event_in.dwell_seconds,
     )
 
     try:
@@ -170,6 +180,19 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database unavailable; unable to store detection event",
         )
+
+    # Update the live position registry for events that carry coordinates.
+    # Kept outside the DB transaction: registry state must not block ingestion.
+    try:
+        record_position(
+            camera_id=db_event.camera_id,
+            track_id=db_event.track_id,
+            person_name=db_event.person_name,
+            x=db_event.position_x,
+            y=db_event.position_y,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"Position registry update failed: {type(exc).__name__}")
 
     return EventResponse(
         received=True,

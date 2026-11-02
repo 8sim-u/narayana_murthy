@@ -45,11 +45,21 @@ def _parse_float(value, default):
 def _load_cameras():
     """Resolve the camera map, highest priority source first.
 
+    0. CAMERA_STREAM_URL: single-camera shorthand for edge nodes, e.g.
+       CAMERA_STREAM_URL="1" with CAMERA_ID="CAM_01" (defaults to CAM_01).
+       A numeric string means a local webcam device index; anything else
+       is treated as a stream URL (RTSP/MJPEG).
     1. WAMSS_CAMERAS: a JSON object mapping camera id to stream URL, e.g.
        WAMSS_CAMERAS='{"CAM_01":"http://10.0.0.5:8080/video"}'
     2. Numbered vars: WAMSS_CAM_<id>_URL, e.g. WAMSS_CAM_01_URL=...
     3. SAMPLE_CAMERAS: placeholder URLs only (never real cameras).
     """
+    single = os.environ.get("CAMERA_STREAM_URL", "").strip()
+    if single:
+        cam_id = os.environ.get("CAMERA_ID", "CAM_01").strip() or "CAM_01"
+        print(f"[config] Camera from CAMERA_STREAM_URL: {cam_id}")
+        return _normalize_cameras({cam_id: single})
+
     raw = os.environ.get("WAMSS_CAMERAS")
     if raw:
         try:
@@ -74,7 +84,7 @@ def _load_cameras():
 
     print("[config] WARNING: no cameras configured; using SAMPLE-ONLY "
           "placeholder URLs (192.0.2.x documentation addresses). Set "
-          "WAMSS_CAMERAS or WAMSS_CAM_<id>_URL to run for real.")
+          "CAMERA_STREAM_URL, WAMSS_CAMERAS or WAMSS_CAM_<id>_URL to run for real.")
     return dict(SAMPLE_CAMERAS)
 
 
@@ -155,6 +165,40 @@ HEADLESS_LOG_INTERVAL = 5.0
 
 
 # ---------------------------------------------------------------------------
+# Workstream 1 (Vision) edge extensions: face recognition, 2D room position,
+# per-track first-sighting snapshots, and dwell time.
+#
+# All of these are best-effort and degrade gracefully: when the optional
+# modules or their dependencies are missing, the pipeline keeps its
+# original behaviour. Face recognition is NEVER used in privacy mode;
+# run_camera_privacy neither imports nor calls face_id (see the privacy
+# guarantee block below).
+# ---------------------------------------------------------------------------
+try:
+    from . import face_id as _face_id          # `python -m vision.multicamera`
+    from . import room_calib as _room_calib
+except ImportError:
+    try:
+        import face_id as _face_id             # `python vision/multicamera.py`
+        import room_calib as _room_calib
+    except ImportError:
+        _face_id = None
+        _room_calib = None
+
+# Directory for first-sighting person snapshots (JPEG crops). Empty
+# disables snapshots entirely.
+SNAPSHOT_DIR = os.environ.get("WAMSS_SNAPSHOT_DIR", "data/snapshots").strip()
+
+# Face recognition on the non-privacy path. Requires an enrolled gallery
+# in vision/faces/; without a backend or gallery, names stay "unknown".
+FACE_ID_ENABLED = _parse_bool(os.environ.get("WAMSS_FACE_ID"), True)
+
+# Optional 2D room calibration JSON (see vision/room_calib.py). Without it,
+# positions are normalized frame coordinates plus a bbox-height depth proxy.
+ROOM_CALIB_PATH = os.environ.get("WAMSS_ROOM_CALIB", "").strip()
+
+
+# ---------------------------------------------------------------------------
 # Privacy mode machinery (WAMSS_PRIVACY_MODE=1)
 #
 # DISK-WRITE AUDIT (2026-10-30, privacy round): this file previously contained
@@ -169,6 +213,11 @@ HEADLESS_LOG_INTERVAL = 5.0
 # never become identity ("who is here"). Any future code path that needs
 # re-identification, face recognition, or gaze estimation must be refused by
 # _assert_privacy_model_allowed() and documented in vision/README.md.
+#
+# Workstream 1 note: vision/face_id.py is imported only by run_camera()
+# (the non-privacy path). run_camera_privacy never imports or calls it, and
+# "face_recognition" is not in _PRIVACY_ALLOWED_MODELS, so requesting it in
+# privacy mode would raise.
 # ---------------------------------------------------------------------------
 
 _PRIVACY_ALLOWED_MODELS = (
@@ -269,6 +318,70 @@ def save_frame_snapshot(frame, path):
     return True
 
 
+def _load_room_calibration():
+    """Load the optional 4-point room calibration; None when absent/bad."""
+    if _room_calib is None or not ROOM_CALIB_PATH:
+        return None
+    try:
+        calib = _room_calib.load_calibration(ROOM_CALIB_PATH)
+        print(f"[config] Room calibration loaded: {ROOM_CALIB_PATH}")
+        return calib
+    except Exception as exc:
+        print(f"[config] WARNING: ignoring bad room calibration "
+              f"({ROOM_CALIB_PATH}): {exc}")
+        return None
+
+
+def _identify_crop(frame, bbox):
+    """Best-effort person name for a bbox crop; "unknown" on any failure."""
+    if _face_id is None or not FACE_ID_ENABLED:
+        return "unknown"
+    try:
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return "unknown"
+        return _face_id.identify(frame[y1:y2, x1:x2])
+    except Exception:
+        return "unknown"
+
+
+def _save_person_snapshot(frame, bbox, track_key, snapshots):
+    """Save a first-sighting JPEG crop of a track. Best-effort: never raises.
+
+    Records snapshots[track_key] as a relative path like
+    "snapshots/Person_1_20261102_120501.jpg" (relative to the snapshot
+    dir's parent), or None when snapshots are disabled or the save failed.
+    """
+    snapshots[track_key] = None
+    if not SNAPSHOT_DIR:
+        return
+    try:
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return
+        safe_id = re.sub(r"[^A-Za-z0-9]+", "_", track_key).strip("_")
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        full_path = os.path.join(SNAPSHOT_DIR, f"{safe_id}_{stamp}.jpg")
+        # Routed through the privacy-audited disk-write helper. Privacy
+        # mode never calls this: its loop stores no raw frames.
+        save_frame_snapshot(frame[y1:y2, x1:x2], full_path)
+        if os.path.isfile(full_path):
+            rel = os.path.relpath(
+                full_path, os.path.dirname(os.path.abspath(SNAPSHOT_DIR)))
+            snapshots[track_key] = rel.replace(os.sep, "/")
+    except Exception as exc:
+        print(f"[snapshot] WARNING: could not save snapshot for "
+              f"{track_key}: {exc}")
+        snapshots[track_key] = None
+
+
 class PrivacyDetector:
     """Privacy-mode presence pipeline: MediaPipe on-device, aggregates only.
 
@@ -356,6 +469,12 @@ def run_camera(camera_id, stream_url):
     last_event_time = 0.0
     last_summary_time = 0.0
 
+    # Workstream 1 state: per-track first-seen times (dwell time),
+    # first-sighting snapshot paths, and the optional room calibration.
+    first_seen = {}
+    snapshots = {}
+    calib = _load_room_calibration()
+
     if not cap.isOpened():
         print(f"[{camera_id}] ERROR: Cannot open camera stream")
         return
@@ -385,17 +504,51 @@ def run_camera(camera_id, stream_url):
 
             person_count = len(boxes) if boxes is not None else 0
 
+            # Per-frame per-track bookkeeping: first-seen timestamps for
+            # dwell time, and a first-sighting snapshot for each new track.
+            # Best-effort; failures here never stop the pipeline.
+            if boxes is not None and boxes.id is not None:
+                track_ids = boxes.id.cpu().tolist()
+                track_boxes = boxes.xyxy.cpu().tolist()
+                for tid, tbox in zip(track_ids, track_boxes):
+                    track_key = f"Person {int(tid)}"
+                    if track_key not in first_seen:
+                        first_seen[track_key] = now
+                        _save_person_snapshot(frame, tbox, track_key,
+                                              snapshots)
+
             # Send an event when a person is detected
             if person_count > 0 and now - last_event_time >= EVENT_INTERVAL:
                 confidences = boxes.conf.cpu().tolist()
 
-                track_id = "unknown"
+                track_key = "unknown"
+                bbox = boxes.xyxy[0].cpu().tolist()
                 if boxes.id is not None:
-                    track_id = str(int(boxes.id[0].item()))
+                    track_key = f"Person {int(boxes.id[0].item())}"
+
+                frame_h, frame_w = frame.shape[:2]
+                if _room_calib is not None:
+                    position_x, position_y = _room_calib.map_position(
+                        bbox, frame_w, frame_h, calib)
+                else:
+                    # Degraded fallback: normalized bottom-center plus a
+                    # bbox-height depth proxy (same formula as
+                    # room_calib.map_position without calibration).
+                    x1, y1, x2, y2 = bbox
+                    position_x = min(1.0, max(0.0,
+                                              ((x1 + x2) / 2) / frame_w))
+                    position_y = min(1.0, max(0.0, (y2 - y1) / frame_h))
+
+                dwell_seconds = now - first_seen.get(track_key, now)
 
                 event = {
                     "camera_id": camera_id,
-                    "track_id": track_id,
+                    "track_id": track_key,
+                    "person_name": _identify_crop(frame, bbox),
+                    "position_x": float(position_x),
+                    "position_y": float(position_y),
+                    "snapshot_path": snapshots.get(track_key),
+                    "dwell_seconds": float(dwell_seconds),
                     "objects": ["person"],
                     "confidence": float(max(confidences)),
                     "zone": "UNKNOWN",
@@ -414,7 +567,8 @@ def run_camera(camera_id, stream_url):
                     print(
                         f"[{camera_id}] Person detected | "
                         f"Backend: {data.get('decision', 'UNKNOWN')} | "
-                        f"Track: {track_id}"
+                        f"Track: {track_key} | "
+                        f"Name: {event['person_name']}"
                     )
 
                 except requests.RequestException as exc:
@@ -552,6 +706,9 @@ def main():
     print(f"[config] Event interval: {EVENT_INTERVAL}s, headless: {HEADLESS}")
     print(f"[config] Privacy mode: {PRIVACY_MODE}"
           + (f" (debounce={OCCUPANCY_DEBOUNCE_S}s)" if PRIVACY_MODE else ""))
+    print(f"[config] Face ID: {FACE_ID_ENABLED}, snapshots: "
+          f"{SNAPSHOT_DIR or 'disabled'}, room calibration: "
+          f"{ROOM_CALIB_PATH or 'none'}")
 
     threads = []
 

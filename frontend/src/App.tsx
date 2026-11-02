@@ -12,13 +12,14 @@ import SecurityAlerts from './components/SecurityAlerts';
 import PolicyView from './components/PolicyView';
 import TeamView from './components/TeamView';
 import AnalyticsTab from './components/AnalyticsTab';
+import RoomMapTab from './components/RoomMapTab';
 import OfficeSelector from './components/OfficeSelector';
 import ExportButton from './components/ExportButton';
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_LIMIT = 100;
 
-type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics';
+type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics' | 'roommap';
 
 const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
   { id: 'events', label: 'Vision Events', kicker: 'Camera network', blurb: 'Detection feed from every camera zone, refreshed live.' },
@@ -29,6 +30,7 @@ const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
   { id: 'policy', label: 'Policy', kicker: 'Rules and privacy', blurb: 'Working-time rules, violation checks and privacy controls.' },
   { id: 'team', label: 'Team', kicker: 'Aggregates', blurb: 'Focus, strain, break compliance and presence per team.' },
   { id: 'analytics', label: 'Trends', kicker: 'Week over week', blurb: 'Weekly focus and strain movement.' },
+  { id: 'roommap', label: 'Room Map', kicker: 'Live floor plan', blurb: 'Tracked persons, dwell heatmap and occupancy timeline.' },
 ];
 
 const PAGE_TITLES: Record<Tab, string> = {
@@ -40,6 +42,7 @@ const PAGE_TITLES: Record<Tab, string> = {
   policy: 'Policy and Privacy',
   team: 'Team view',
   analytics: 'Trends',
+  roommap: 'Room Map',
 };
 
 function useClock(): string {
@@ -185,6 +188,7 @@ export default function App() {
           {tab === 'policy' && <PolicyView />}
           {tab === 'team' && <TeamView officeId={officeId} />}
           {tab === 'analytics' && <AnalyticsTab />}
+          {tab === 'roommap' && <RoomMapTab />}
         </div>
 
         <footer className="footer-note">
