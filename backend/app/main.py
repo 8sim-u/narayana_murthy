@@ -26,7 +26,7 @@ from app.schemas import EventCreate, EventDetail, EventResponse
 from app import activity_models  # noqa: F401 - registers ActivityLog
 from app import security_models  # noqa: F401 - registers SecurityEvent
 from app.activity import router as activity_router
-from app.edge import ensure_schema, record_position
+from app.edge import ensure_schema, record_identity_sighting, record_position
 from app.edge import router as edge_router
 from app.focus import router as focus_router
 from app.presence import router as presence_router
@@ -163,6 +163,7 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
         alerts=rule_result.alerts,
         timestamp=now_utc,
         person_name=event_in.person_name,
+        person_name_confidence=event_in.person_name_confidence,
         position_x=event_in.position_x,
         position_y=event_in.position_y,
         snapshot_path=event_in.snapshot_path,
@@ -190,9 +191,21 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
             person_name=db_event.person_name,
             x=db_event.position_x,
             y=db_event.position_y,
+            person_name_confidence=db_event.person_name_confidence,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(f"Position registry update failed: {type(exc).__name__}")
+
+    # Bump the known-persons registry for sightings of a known person.
+    # Cheap upsert, kept outside the event transaction: a registry failure
+    # must never break ingestion (record_identity_sighting swallows DB
+    # errors after a rollback).
+    try:
+        record_identity_sighting(
+            db, db_event.person_name, camera_id=db_event.camera_id
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"Identity registry update failed: {type(exc).__name__}")
 
     return EventResponse(
         received=True,

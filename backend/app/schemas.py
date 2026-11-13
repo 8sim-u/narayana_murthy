@@ -12,6 +12,10 @@ class EventCreate(BaseModel):
     zone: str = Field(default="UNKNOWN", description="Monitoring zone identifier")
     # Edge roadmap fields (all optional for backward compatibility).
     person_name: Optional[str] = Field(default=None, description="Recognized person name, or 'unknown'")
+    person_name_confidence: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Confidence of the person identification (0.0-1.0); null when the vision node did not report one",
+    )
     position_x: Optional[float] = Field(default=None, description="Normalized x position in frame (0.0-1.0)")
     position_y: Optional[float] = Field(default=None, description="Normalized y position in frame (0.0-1.0)")
     snapshot_path: Optional[str] = Field(default=None, description="Snapshot file path relative to data/, e.g. snapshots/Person_1_20261102_120501.jpg")
@@ -36,6 +40,7 @@ class EventDetail(BaseModel):
     alerts: List[str]
     timestamp: datetime
     person_name: Optional[str] = None
+    person_name_confidence: Optional[float] = None
     position_x: Optional[float] = None
     position_y: Optional[float] = None
     snapshot_path: Optional[str] = None

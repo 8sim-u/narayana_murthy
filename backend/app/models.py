@@ -29,10 +29,35 @@ class DetectionEvent(Base):
     # Edge roadmap fields (added 2026-11-02). All nullable so older rows and
     # older edge payloads keep working.
     person_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    person_name_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     position_x: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     position_y: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     snapshot_path: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     dwell_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+
+class PersonIdentity(Base):
+    """Persistent known-persons registry.
+
+    One row per known person, surviving backend restarts. A person is
+    known when they have a gallery entry (faces table) and/or a row here.
+    Enrollment creates the row; later sightings bump last_seen, sightings,
+    and the list of cameras the person has been seen on. ``cameras`` is a
+    JSON list of camera ids.
+    """
+
+    __tablename__ = "person_identities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    enrolled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    sightings: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cameras: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
 
 
 class FaceRecord(Base):

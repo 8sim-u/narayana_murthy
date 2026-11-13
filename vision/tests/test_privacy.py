@@ -312,6 +312,45 @@ def test_allowed_models_pass(monkeypatch, kind):
     mod._assert_privacy_model_allowed(kind)  # must not raise
 
 
+def test_build_gallery_refresher_none_in_privacy_mode(monkeypatch):
+    """Privacy mode builds no gallery sync, even when a backend is
+    configured and face recognition is on: no version polls, no gallery
+    fetches, no face identification of any kind."""
+    class _FakeFaceId:
+        GALLERY_DIR = "/tmp/no-such-gallery"
+        reload_calls = 0
+
+        def reload_gallery(self):
+            _FakeFaceId.reload_calls += 1
+
+    monkeypatch.setitem(sys.modules, "face_id", _FakeFaceId)
+    monkeypatch.setenv("WAMSS_GALLERY_BASE_URL", "http://192.0.2.20:8000")
+    monkeypatch.setenv("WAMSS_FACE_ID", "1")
+    monkeypatch.delenv("WAMSS_BACKEND_URL", raising=False)
+    mod = _load_multicamera(monkeypatch, privacy=True,
+                            mediapipe_detections="absent")
+    assert mod.PRIVACY_MODE is True
+    assert mod.FACE_ID_ENABLED is True
+    assert mod.GALLERY_BASE_URL == "http://192.0.2.20:8000"
+    assert mod._build_gallery_refresher() is None
+
+
+def test_gallery_refresher_refuses_to_poll_in_privacy_mode(monkeypatch):
+    """A refresher built with privacy_mode=True is disabled and performs
+    no HTTP fetch, even when a getter is supplied."""
+    mod = _load_multicamera(monkeypatch, privacy=True,
+                            mediapipe_detections="absent")
+
+    def _raising_http(url, timeout=2.0, headers=None):
+        raise AssertionError("privacy mode must perform no gallery fetch")
+
+    refresher = mod.GalleryRefresher(
+        "http://192.0.2.20:8000", 30.0, object(),
+        http_get=_raising_http, privacy_mode=True)
+    assert refresher.enabled is False
+    assert refresher.maybe_refresh(1000.0) is False
+
+
 # --------------------------------------------------------------------------
 # Occupancy debounce (5 s default)
 # --------------------------------------------------------------------------

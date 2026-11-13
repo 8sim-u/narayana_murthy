@@ -145,6 +145,90 @@ CAMERA_STREAM_URL="http://192.168.1.61:8080/video" CAMERA_ID="PHONE_01" \
 - Keep the dashboard port (`8080`) reachable for browsers; edge nodes do not
   need it.
 
+## Identity: remembering who a person is
+
+YOLO alone only says "a person is here", and ByteTrack ids (`Person 1`,
+`Person 2`, ...) live only while a person stays in view. Remembering *who*
+a person is comes from face recognition against an enrolled gallery, and
+that memory survives track-id changes, camera changes, and restarts.
+
+### Enrolling people
+
+Two ways, same result:
+
+- **Command line, on the node or any machine with the repo:**
+  `python vision/enroll_face.py --photo <photo.jpg> --name "Full Name"`.
+  A clear front-facing photo works best. This writes an embedding sidecar
+  to `vision/faces/` (never commit those files; only `.gitkeep` and
+  `README.md` belong there). A node that is already running does **not**
+  pick up a CLI enrollment on its own: restart the node after enrolling
+  this way.
+- **Dashboard:** the Unknown people panel lists recent unknown sightings
+  with their first-sighting snapshot. Type a name next to one and it calls
+  `POST /faces/enroll {"name", "snapshot_path"}`, which stores the face in
+  the backend gallery and registry. The Known people panel lists everyone
+  enrolled, with last seen, and can remove someone (`DELETE /faces/{name}`).
+
+The backend is the source of truth for the gallery (embeddings live in its
+faces table). `GET /faces` lists enrolled people, `GET /identities` is the
+registry with last seen and sighting counts, `GET /unknowns` is the review
+queue, and `GET /faces/gallery` serves name plus embedding pairs for node
+sync.
+
+### How memory works
+
+- Every tracked person is identified, not just the first box in frame. One
+  event is posted per person per interval, each with its own `person_name`,
+  `person_name_confidence`, track id, position, and dwell time.
+- Identification runs on first sight of a track, then re-verifies
+  periodically (every `WAMSS_IDENTITY_RECHECK_FRAMES` frames or
+  `WAMSS_IDENTITY_RECHECK_SECONDS` seconds, whichever comes first;
+  defaults 30 frames / 5 s), never every frame.
+- Names are smoothed by majority voting over the last
+  `WAMSS_IDENTITY_VOTE_WINDOW` votes (default 7). A name is assigned only
+  when it holds a strict majority, has at least `WAMSS_IDENTITY_MIN_VOTES`
+  agreeing votes (default 2), and its mean match confidence clears
+  `WAMSS_IDENTITY_MIN_CONFIDENCE` (default 0.5). Once named, a track keeps
+  its name until another name wins a strict majority, so one bad frame, a
+  tie, or a run of unknown votes cannot flip it. Unknown tracks stay
+  `"unknown"` with a null confidence.
+- The long-term memory is the enrolled gallery, not the per-track cache: a
+  person who leaves and returns under a new track id is re-identified from
+  the gallery on first sight of the new track, on any camera.
+- Every new track gets a first-sighting snapshot (JPEG crop) whether it is
+  recognised or not, so unknown people land in the review queue.
+
+### Gallery sync (no restart for dashboard enrollments)
+
+A running node polls `GET /faces/gallery/version` every
+`WAMSS_GALLERY_POLL_SECONDS` (default 30 s). When the version changes it
+re-fetches `GET /faces/gallery`, writes the entries as sidecars, and calls
+`face_id.reload_gallery()`, so a person enrolled on the dashboard is
+recognised within about 30 s without restarting any node. Sync is OFF
+unless a backend is explicitly configured: set `WAMSS_GALLERY_BASE_URL`,
+or set `WAMSS_BACKEND_URL` (the `/event` suffix is stripped). Any HTTP or
+disk failure is logged and the local gallery is kept. Sync never runs in
+privacy mode, and face recognition never runs in privacy mode
+(`WAMSS_PRIVACY_MODE=1`): the privacy loop has no track ids, no names, and
+no gallery fetch.
+
+### Thresholds
+
+- `WAMSS_FACE_SIM_THRESHOLD` (insightface cosine similarity, default
+  `0.5`): below this, a face stays `"unknown"`. Raise it to cut false
+  matches; lower it to recognise harder angles, at the cost of more
+  false matches.
+- `WAMSS_LBPH_THRESHOLD` (LBPH distance, default `70`, smaller is a
+  better match): the fallback when insightface is not installed.
+- `WAMSS_FACE_ID=0` disables recognition entirely (all names
+  `"unknown"`).
+
+**Not yet verified:** identity has been unit-tested with synthetic frames
+and a stubbed face backend only. Before production use, validate against a
+real camera: naming latency after first sight, stability of names across
+track-id changes, and the false-match rate of your enrolled gallery at the
+default thresholds.
+
 ## Troubleshooting
 
 - **Camera busy / "Cannot open camera stream":** another app (Zoom, Teams,

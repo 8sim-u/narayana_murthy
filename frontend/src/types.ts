@@ -27,6 +27,10 @@ export interface DetectionEvent {
   // snapshot_path is the backend thumbnail path for this event.
   person_name?: string | null;
   snapshot_path?: string | null;
+  // Identity confidence for the recognized person, when the vision
+  // pipeline reports one. Null when the person is unknown or no score
+  // was produced.
+  person_name_confidence?: number | null;
 }
 
 export interface EventCreate {
@@ -49,6 +53,9 @@ export interface EventResponse {
 export interface PersonPosition {
   track_id: string;
   person_name: string | null;
+  // Identity confidence for person_name, when the vision pipeline
+  // reports one. Null when unknown or unscored.
+  person_name_confidence?: number | null;
   x: number;
   y: number;
   camera_id: string;
@@ -68,4 +75,25 @@ export interface OccupancyBucket {
   t: string;
   count: number;
   camera_id: string;
+}
+
+// GET /identities -> enrolled people registry. All fields except name are
+// optional: the endpoint may be absent (404) or a row may lack a value.
+export interface Identity {
+  name: string;
+  enrolled_at?: string | null;
+  last_seen?: string | null;
+  sightings?: number | null;
+  cameras?: string[] | null;
+}
+
+// GET /unknowns -> recent unknown sightings awaiting review. Fields are
+// optional so a missing or partial row never breaks the panel.
+export interface UnknownSighting {
+  id?: string | number | null;
+  track_id?: string | null;
+  snapshot_path?: string | null;
+  camera_id?: string | null;
+  timestamp?: string | null;
+  last_seen?: string | null;
 }

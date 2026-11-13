@@ -209,35 +209,50 @@ def extract_embedding(image_bgr):
         return None
 
 
-def _identify_insightface(crop_bgr):
+def _identify_insightface_scored(crop_bgr):
+    """(name, confidence) via insightface, or ("unknown", None).
+
+    Confidence is the cosine similarity of the best gallery match
+    (0..1 for a normalized embedding at or above the match threshold).
+    """
     faces = _face_app.get(crop_bgr)
     if not faces:
-        return "unknown"
+        return "unknown", None
     best = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0])
                * (f.bbox[3] - f.bbox[1]))
     emb = [float(v) for v in best.normed_embedding]
     entries = [e for e in _load_gallery()
                if e.get("method") == "insightface" and e.get("embedding")]
     if not entries:
-        return "unknown"
+        return "unknown", None
     threshold = float(os.environ.get("WAMSS_FACE_SIM_THRESHOLD", "0.5"))
     score, name = max(
         ((_cosine(emb, e["embedding"]), e["name"]) for e in entries),
         key=lambda s: s[0])
-    return name if score >= threshold else "unknown"
+    if score < threshold:
+        return "unknown", None
+    return name, float(max(0.0, min(1.0, score)))
 
 
-def _identify_lbph(crop_bgr):
+def _identify_lbph_scored(crop_bgr):
+    """(name, confidence) via LBPH, or ("unknown", None).
+
+    LBPH reports a distance (smaller is a better match), so confidence is
+    mapped linearly from the match threshold: 1.0 at distance 0, 0.0 at
+    the threshold, clamped to 0..1.
+    """
     patch = _largest_face_patch(crop_bgr)
     if patch is None:
-        return "unknown"
+        return "unknown", None
     label, distance = _lbph_rec.predict(patch)
-    # LBPH reports a distance: smaller is a better match.
     threshold = float(os.environ.get("WAMSS_LBPH_THRESHOLD", "70"))
     name = _lbph_labels.get(int(label))
     if name is None or distance > threshold:
-        return "unknown"
-    return name
+        return "unknown", None
+    if threshold <= 0:
+        return name, 0.0
+    confidence = 1.0 - float(distance) / threshold
+    return name, float(max(0.0, min(1.0, confidence)))
 
 
 def identify(crop_bgr):
@@ -246,14 +261,25 @@ def identify(crop_bgr):
     Never raises: missing backends, an empty gallery, no detectable face,
     or a bad crop all yield "unknown", so the pipeline keeps running.
     """
+    name, _confidence = identify_with_confidence(crop_bgr)
+    return name
+
+
+def identify_with_confidence(crop_bgr):
+    """Return (name, confidence) for a BGR person crop.
+
+    Confidence is a float in 0..1 when a face matched an enrolled person,
+    and None when no face matched (or no backend / no face was available).
+    Never raises: every failure path yields ("unknown", None).
+    """
     try:
         _init_backend()
         if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
-            return "unknown"
+            return "unknown", None
         if _backend == "insightface":
-            return _identify_insightface(crop_bgr)
+            return _identify_insightface_scored(crop_bgr)
         if _backend == "lbph":
-            return _identify_lbph(crop_bgr)
-        return "unknown"
+            return _identify_lbph_scored(crop_bgr)
+        return "unknown", None
     except Exception:
-        return "unknown"
+        return "unknown", None

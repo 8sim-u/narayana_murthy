@@ -5,8 +5,10 @@ import type {
   EventResponse,
   HealthStatus,
   HeatPoint,
+  Identity,
   OccupancyBucket,
   PersonPosition,
+  UnknownSighting,
 } from './types';
 
 // Same-origin by default: the dashboard calls the relative path /api/*,
@@ -84,4 +86,44 @@ export async function getOccupancy(hours = 24, bucket = '15m'): Promise<Occupanc
 export function snapshotUrl(snapshotPath: string): string {
   const filename = snapshotPath.split('/').pop() ?? snapshotPath;
   return `${API_URL}/snapshots/${encodeURIComponent(filename)}`;
+}
+
+// Fetch a list endpoint that may not exist yet (identity endpoints land
+// separately from the UI). A 404 means "not available yet" and resolves to
+// the fallback instead of throwing; any other failure still throws.
+async function fetchOptionalList<T>(path: string, fallback: T[]): Promise<T[]> {
+  const res = await fetch(`${API_URL}${path}`);
+  if (res.status === 404) return fallback;
+  return handleResponse<T[]>(res);
+}
+
+// GET /identities -> enrolled people registry. Returns [] when the
+// endpoint is not deployed yet.
+export async function getIdentities(): Promise<Identity[]> {
+  return fetchOptionalList<Identity>('/identities', []);
+}
+
+// GET /unknowns -> recent unknown sightings awaiting review. Returns []
+// when the endpoint is not deployed yet.
+export async function getUnknowns(): Promise<UnknownSighting[]> {
+  return fetchOptionalList<UnknownSighting>('/unknowns', []);
+}
+
+// POST /faces/enroll -> enroll an unknown sighting under a typed name.
+// Sends JSON { name, snapshot_path } as specified for the identity build.
+export async function enrollFace(name: string, snapshotPath: string): Promise<unknown> {
+  const res = await fetch(`${API_URL}/faces/enroll`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, snapshot_path: snapshotPath }),
+  });
+  return handleResponse<unknown>(res);
+}
+
+// DELETE /faces/{name} -> remove an enrolled person from the registry.
+export async function deleteIdentity(name: string): Promise<unknown> {
+  const res = await fetch(`${API_URL}/faces/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+  return handleResponse<unknown>(res);
 }

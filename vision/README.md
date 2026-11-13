@@ -116,3 +116,64 @@ frames only. Before production use, validate against a real camera: the
 5 s debounce against real walk-bys, the standing/sitting heuristic against
 real postures, MediaPipe face-detection recall on your camera angles, and
 confirm no unblurred frame ever lands in `WAMSS_PRIVACY_SNAPSHOT_DIR`.
+
+## Face recognition (non-privacy path)
+
+Enrolled people are recognised by name. Enroll with
+`python vision/enroll_face.py --photo <photo.jpg> --name "Full Name"`,
+which stores an embedding in `vision/faces/` (never commit those files;
+only `.gitkeep` and `README.md` belong there). The backend is insightface
+when installed, otherwise the OpenCV LBPH fallback; with neither,
+everyone stays `"unknown"` and the pipeline keeps working.
+
+How it works (`vision/identity_cache.py`, wired into `run_camera()`):
+
+- Every tracked person is identified, not just the first box in frame.
+  One event is posted per person per interval, each with its own
+  `person_name`, `person_name_confidence`, track id, position and dwell.
+- Identification runs on first sight of a track, then re-verifies
+  periodically (every `WAMSS_IDENTITY_RECHECK_FRAMES` frames or
+  `WAMSS_IDENTITY_RECHECK_SECONDS` seconds per track, whichever comes
+  first; defaults 30 frames / 5 s), never every frame.
+- Names are smoothed by majority voting over the last
+  `WAMSS_IDENTITY_VOTE_WINDOW` votes (default 7). A name is assigned only
+  when it holds a strict majority of the votes, has at least
+  `WAMSS_IDENTITY_MIN_VOTES` agreeing votes (default 2), and its mean
+  match confidence clears `WAMSS_IDENTITY_MIN_CONFIDENCE` (default 0.5).
+  Once named, a track keeps its name until another name wins a strict
+  majority, so one bad frame, a tie, or a run of unknown votes cannot
+  flip it. Unknown tracks stay `"unknown"` with a `null` confidence.
+- The long-term memory is the enrolled gallery, not the cache: a person
+  who leaves and returns under a new track id is re-identified from the
+  gallery on first sight of the new track.
+- Every new track gets a first-sighting snapshot (JPEG crop) whether it
+  is recognised or not, so unknown people land in the review queue with
+  `snapshot_path` set in the event.
+- Face recognition never runs in privacy mode (`WAMSS_PRIVACY_MODE=1`).
+
+Configuration:
+
+- `WAMSS_FACE_ID` - `0` disables face recognition (all names
+  `"unknown"`). Default: `1`.
+- `WAMSS_SNAPSHOT_DIR` - directory for first-sighting snapshots.
+  Default: `data/snapshots`. Empty disables snapshots.
+- `WAMSS_ROOM_CALIB` - optional room calibration JSON (see
+  `vision/room_calib.py`). Default: empty (normalized frame coordinates).
+- `WAMSS_FACE_SIM_THRESHOLD` - insightface cosine-similarity match
+  threshold. Default: `0.5`.
+- `WAMSS_LBPH_THRESHOLD` - LBPH distance match threshold. Default: `70`.
+- `WAMSS_IDENTITY_RECHECK_FRAMES` / `WAMSS_IDENTITY_RECHECK_SECONDS` -
+  re-verification cadence per track. Defaults: `30` / `5.0`.
+- `WAMSS_IDENTITY_VOTE_WINDOW` - votes kept per track. Default: `7`.
+- `WAMSS_IDENTITY_MIN_VOTES` - agreeing votes needed to name a track.
+  Default: `2`.
+- `WAMSS_IDENTITY_MIN_CONFIDENCE` - mean confidence a name needs.
+  Default: `0.5`.
+- `WAMSS_IDENTITY_STALE_SECONDS` - drop a track's state after this long
+  unseen. Default: `600`.
+
+**Not yet verified:** identity has been unit-tested with synthetic frames
+and a stubbed face backend only. Before production use, validate against
+a real camera: naming latency after first sight, stability of names
+across track-id changes, and the false-match rate of your enrolled
+gallery at the default thresholds.

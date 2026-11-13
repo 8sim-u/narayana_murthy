@@ -62,11 +62,17 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
         <tbody>
           {events.map((e, i) => {
             const alert = isRestrictedAlert(e);
+            const unknown = !isKnownPerson(e.person_name);
             return (
               <tr
                 key={`${batchRef.current}-${e.id}`}
                 className={`sheet-row${alert ? ' row-alert' : ''}`}
-                style={{ '--i': Math.min(i, 24) } as React.CSSProperties}
+                style={
+                  {
+                    '--i': Math.min(i, 24),
+                    ...(unknown && !alert ? { backgroundColor: 'var(--cloud)' } : {}),
+                  } as React.CSSProperties
+                }
               >
                 <td className="num">{e.id}</td>
                 <td className="num">{formatTimestamp(e.timestamp)}</td>
@@ -74,9 +80,17 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
                 <td className="id">{e.track_id}</td>
                 <td>
                   {isKnownPerson(e.person_name) ? (
-                    <Chip tone="signal">{e.person_name}</Chip>
+                    <Chip tone="signal">
+                      {e.person_name}
+                      {typeof e.person_name_confidence === 'number' &&
+                        Number.isFinite(e.person_name_confidence) && (
+                          <span className="num" style={{ marginLeft: 6 }}>
+                            {e.person_name_confidence.toFixed(2)}
+                          </span>
+                        )}
+                    </Chip>
                   ) : (
-                    <Chip tone="idle">unknown</Chip>
+                    <Chip tone="idle">Unknown</Chip>
                   )}
                 </td>
                 <td>

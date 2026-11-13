@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getHeatmap, getOccupancy, getPositions } from '../api';
 import type { HeatPoint, OccupancyBucket, PersonPosition } from '../types';
+import { KnownPeopleList, UnknownPeoplePanel } from './IdentityPanels';
 import { EmptyState, ErrorNotice, SectionHead, SkeletonCards, Stat } from './ui';
 
 const POLL_MS = 2000;
@@ -333,7 +334,16 @@ export default function RoomMapTab() {
                 const cx = clamp01(p.x) * MAP_W;
                 const cy = clamp01(p.y) * MAP_H;
                 const known = isKnownName(p.person_name);
-                const label = known ? (p.person_name as string) : p.track_id;
+                const conf =
+                  typeof p.person_name_confidence === 'number' &&
+                  Number.isFinite(p.person_name_confidence)
+                    ? p.person_name_confidence.toFixed(2)
+                    : null;
+                const label = known
+                  ? conf !== null
+                    ? `${p.person_name as string} ${conf}`
+                    : (p.person_name as string)
+                  : 'Unknown';
                 const fill = known ? 'var(--ice)' : 'var(--ink)';
                 const opacity = known ? 1 : 0.55;
                 return (
@@ -409,6 +419,11 @@ export default function RoomMapTab() {
           <OccupancyChart buckets={occupancy} />
         )}
       </section>
+
+      <div className="grid-2" style={{ marginTop: 20 }}>
+        <UnknownPeoplePanel />
+        <KnownPeopleList />
+      </div>
     </div>
   );
 }
