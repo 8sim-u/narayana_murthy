@@ -56,6 +56,21 @@ identity panels, and unknown people review all compile.
 
 ## Live proofs (real laptop camera, agbeast-1)
 
+### Evidence photos
+
+Dashboard, Vision Events tab, 2026-10-30. Event Ledger with 100 events
+across CAM_01, CAM_02, CAM_03, track ids, confidence bars, zones, and
+decisions. This is the Mumbrane-style console after the redesign.
+
+![WAMSS dashboard, Vision Events, Oct 30 2026](evidence/dashboard-vision-events-2026-10-30.png)
+
+Note: the Nov 1 live camera frame showing the YOLO box "Person 93.7%" was
+saved only in the VM's temporary folder and was wiped by a VM restart. It is
+not in the repo. It will be re-captured during the live identity test (issue
+#22) and stored here. The Nov 3 frame (blur only, likely lid closed or lens
+covered) is still on the laptop at `C:\Users\Ayyg\wamss-backend\cam-check.jpg`
+and will be added when the tunnel is back.
+
 - Person detection verified with a saved photo: YOLO box "Person 93.7%",
   17+ FPS, on the real Smart Connect Camera (index 1). The Integrated Camera
   (index 0) shows only a dark Lenovo logo screen and is not the room.
