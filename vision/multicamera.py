@@ -148,6 +148,11 @@ PRIVACY_MODE = _parse_bool(os.environ.get("WAMSS_PRIVACY_MODE"), False)
 OCCUPANCY_DEBOUNCE_S = _parse_float(
     os.environ.get("WAMSS_OCCUPANCY_DEBOUNCE_S"), 5.0)
 
+# Optional directory for privacy-mode occupancy snapshots. Frames stored here
+# get faces blurred first (MediaPipe). If MediaPipe is absent, frames are NOT
+# stored and the reason is logged. Empty by default: no snapshots are stored.
+PRIVACY_SNAPSHOT_DIR = os.environ.get("WAMSS_PRIVACY_SNAPSHOT_DIR", "").strip()
+
 # Send detection events at most this often per camera, in seconds.
 EVENT_INTERVAL = _parse_float(os.environ.get("WAMSS_EVENT_INTERVAL"), 1.0)
 
@@ -250,9 +255,9 @@ GALLERY_BASE_URL = os.environ.get("WAMSS_GALLERY_BASE_URL", "").strip() \
 # DISK-WRITE AUDIT (2026-10-30, privacy round): this file previously contained
 # no cv2.imwrite, cv2.VideoWriter, or snapshot code at all, so there was
 # nothing to remove. Every frame-persistence call in this file now goes
-# through save_frame_snapshot(). Privacy mode refuses all frame writes; the
-# aggregate pipeline never stores snapshots. Keep it that way: never add a raw
-# cv2.imwrite to the privacy path.
+# through save_frame_snapshot(), which refuses to write in privacy mode
+# unless faces are blurred first (and refuses entirely when MediaPipe is
+# absent). Keep it that way: never add a raw cv2.imwrite to this file.
 #
 # PRIVACY GUARANTEE (do not remove): identity, gaze, and face-recognition
 # models are forbidden in this pipeline. Presence ("someone is here") must
@@ -265,14 +270,16 @@ GALLERY_BASE_URL = os.environ.get("WAMSS_GALLERY_BASE_URL", "").strip() \
 # never imports or calls them, never constructs an IdentityCache, and
 # "face_recognition" is not in _PRIVACY_ALLOWED_MODELS, so requesting it in
 # privacy mode would raise.
-# The legacy GalleryRefresher is not constructed by the camera loop; the
-# active CameraGallery path is also absent in privacy mode, which performs
+# The gallery sync (GalleryRefresher, built only by _build_gallery_refresher
+# on the non-privacy path) is covered by the same rule:
+# _build_gallery_refresher returns None in privacy mode, and the refresher
+# itself refuses to poll when privacy_mode is True, so privacy mode performs
 # no face identification and no gallery network fetch.
 # ---------------------------------------------------------------------------
 
 _PRIVACY_ALLOWED_MODELS = (
-    "face_detection_count_only",  # detection count only; no boxes leave the node
-    "face_detection_blur_only",   # legacy in-memory helper; never used for privacy storage
+    "person_pose",            # coarse pose landmarks, no identity
+    "face_detection_blur_only",  # face boxes used ONLY to blur, never stored
 )
 
 
@@ -296,14 +303,10 @@ class OccupancyDebouncer:
     def __init__(self, debounce_s=5.0):
         self.debounce_s = float(debounce_s)
         self.occupied = False
-        self._since = None
-        self._pending = None
-        self.pending_count = None
+        self._since = None  # when the current streak away from state began
 
     def update(self, person_count, now):
-        """Return a pending transition until acknowledge() confirms delivery."""
-        if self._pending is not None:
-            return self._pending, True
+        """Feed a new count. Returns (occupied, changed)."""
         want_occupied = person_count > 0
         if want_occupied == self.occupied:
             self._since = None
@@ -311,19 +314,10 @@ class OccupancyDebouncer:
         if self._since is None:
             self._since = now
         if now - self._since >= self.debounce_s:
-            self._pending = want_occupied
-            self.pending_count = max(0, int(person_count)) if want_occupied else 0
-            return self._pending, True
+            self.occupied = want_occupied
+            self._since = None
+            return self.occupied, True
         return self.occupied, False
-
-    def acknowledge(self):
-        """Commit the pending state only after the aggregate POST succeeds."""
-        if self._pending is None:
-            return
-        self.occupied = self._pending
-        self._pending = None
-        self.pending_count = None
-        self._since = None
 
 
 def blur_faces(frame):
@@ -362,10 +356,21 @@ def blur_faces(frame):
 
 
 def save_frame_snapshot(frame, path):
-    """Store a non-privacy-mode frame. Privacy mode always refuses snapshots."""
+    """Store a frame to disk, privacy-safe. Returns True when written.
+
+    Privacy mode: faces are blurred first via MediaPipe. If MediaPipe is
+    absent the frame is NOT stored and the reason is logged (returns False).
+    Outside privacy mode: stored as-is (existing behaviour preserved).
+    """
     if PRIVACY_MODE:
-        print("[privacy] snapshot NOT stored: privacy mode permits aggregate data only")
-        return False
+        blurred, ok = blur_faces(frame)
+        if not ok:
+            print(f"[privacy] snapshot NOT stored ({path}): face blurring "
+                  f"is unavailable without mediapipe")
+            return False
+        cv2.imwrite(path, blurred)
+        print(f"[privacy] anonymized snapshot stored: {path}")
+        return True
     cv2.imwrite(path, frame)
     return True
 
@@ -529,7 +534,6 @@ def _build_person_event(camera_id, track_key, person_name, name_confidence,
         "person_name_confidence": name_confidence,
         "position_x": float(position_x),
         "position_y": float(position_y),
-        "position_bounds": [float(v) for v in position_bounds],
         "snapshot_path": snapshot_path,
         "dwell_seconds": float(dwell_seconds),
         "objects": ["person"],
@@ -573,24 +577,32 @@ def _save_person_snapshot(frame, bbox, track_key, snapshots):
 
 
 class PrivacyDetector:
-    """Privacy-mode presence pipeline: on-device count only, no person records.
+    """Privacy-mode presence pipeline: MediaPipe on-device, aggregates only.
 
-    MediaPipe counts face detections locally; the fallback counts YOLO person
-    detections. Neither sends boxes, pose, tracks, or frames off the node.
-    Frames remain in memory and are never written to disk by this class.
+    MediaPipe installed: FaceDetection (on-device BlazeFace) counts people
+    and Pose gives a coarse standing/sitting aggregate. Neither produces
+    embeddings, identities, or gaze. MediaPipe absent: graceful fallback to
+    the YOLO person-class path, emitting counts only (track ids dropped).
+    Frames are processed in memory and never written to disk by this class.
     """
 
     def __init__(self):
         self.backend = None  # "mediapipe" | "yolo_fallback"
         self._mp_face = None
+        self._mp_pose = None
         self._yolo = None
         if mp is not None:
-            _assert_privacy_model_allowed("face_detection_count_only")
+            _assert_privacy_model_allowed("face_detection_blur_only")
+            _assert_privacy_model_allowed("person_pose")
             self._mp_face = mp.solutions.face_detection.FaceDetection(
                 model_selection=1, min_detection_confidence=0.5)
+            self._mp_pose = mp.solutions.pose.Pose(
+                static_image_mode=False,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5)
             self.backend = "mediapipe"
-            print("[privacy] MediaPipe face-count backend active; "
-                  "no identity, pose, or gaze data is generated")
+            print("[privacy] MediaPipe backend active (on-device face "
+                  "detection + pose; no identity, no gaze)")
         else:
             # Graceful fallback: same YOLO weights, but only the person
             # count is used. No track ids, no boxes leave this class.
@@ -601,22 +613,47 @@ class PrivacyDetector:
                   "no pose)")
 
     def detect(self, frame):
-        """Return only an in-memory person count; no pose or identity is retained."""
+        """Return (person_count, coarse_pose) from a BGR frame, in memory."""
         if self._mp_face is not None:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             face_res = self._mp_face.process(rgb)
-            return len(face_res.detections) if face_res.detections else 0
+            count = len(face_res.detections) if face_res.detections else 0
+            pose = self._coarse_pose(rgb) if count > 0 else "unknown"
+            return count, pose
         results = self._yolo(frame, classes=[0], conf=0.45, verbose=False)
         boxes = results[0].boxes
-        return len(boxes) if boxes is not None else 0
+        return (len(boxes) if boxes is not None else 0), "unknown"
+
+    def _coarse_pose(self, rgb):
+        """Best-effort standing/sitting/unknown from pose landmarks."""
+        try:
+            res = self._mp_pose.process(rgb)
+            if not res.pose_landmarks:
+                return "unknown"
+            lm = res.pose_landmarks.landmark
+            # MediaPipe pose indices: 11/12 shoulders, 23/24 hips, 27/28
+            # ankles. Standing when the leg segment is long relative to the
+            # torso; sitting when it is short. Coarse aggregate only.
+            shoulder_y = (lm[11].y + lm[12].y) / 2
+            hip_y = (lm[23].y + lm[24].y) / 2
+            ankle_y = (lm[27].y + lm[28].y) / 2
+            torso = abs(shoulder_y - hip_y)
+            leg = abs(hip_y - ankle_y)
+            if torso <= 0:
+                return "unknown"
+            return "standing" if leg > 0.6 * torso else "sitting"
+        except Exception:
+            return "unknown"
 
 
-def build_privacy_event(camera_id, person_count, occupied):
-    """Aggregate-only occupancy event. Never contains identity or pose fields."""
+def build_privacy_event(camera_id, person_count, coarse_pose, occupied):
+    """Aggregate-only occupancy event. Never contains a track id."""
     return {
         "camera_id": camera_id,
         "occupancy": "occupied" if occupied else "vacant",
         "person_count": int(person_count),
+        "pose": coarse_pose,
+        "privacy_mode": True,
     }
 
 
@@ -737,11 +774,6 @@ def run_camera(camera_id, stream_url):
                         position_x = min(1.0, max(0.0,
                                                   ((x1 + x2) / 2) / frame_w))
                         position_y = min(1.0, max(0.0, (y2 - y1) / frame_h))
-                    position_bounds = (
-                        calib.get("room_size", (1.0, 1.0))
-                        if isinstance(calib, dict) else (1.0, 1.0)
-                    )
-
                     dwell_seconds = now - first_seen.get(track_key, now)
 
                     if identity is not None and track_key != "unknown":
@@ -753,17 +785,19 @@ def run_camera(camera_id, stream_url):
                     else:
                         person_name, name_conf = "unknown", None
 
-                    if (not person_name
-                            or person_name.casefold() not in allowed_names):
-                        # Anonymous or unconsented tracks are never POSTed as
-                        # person events and cannot create movement or alerts.
+                    if (person_name and person_name != "unknown"
+                            and person_name.casefold() not in allowed_names):
+                        # A named track that is not in the camera's current
+                        # consent allow-list is never POSTed as a person
+                        # event. Unknown tracks are posted as anonymous
+                        # presence, as before.
                         continue
 
                     event = _build_person_event(
                         camera_id, track_key, person_name, name_conf,
                         position_x, position_y,
                         None,
-                        dwell_seconds, max_conf, position_bounds)
+                        dwell_seconds, max_conf)
 
                     try:
                         response = requests.post(
@@ -860,12 +894,12 @@ def run_camera_privacy(camera_id, stream_url):
                 continue
 
             now = time.time()
-            person_count = detector.detect(frame)
+            person_count, coarse_pose = detector.detect(frame)
             occupied, changed = debouncer.update(person_count, now)
 
             if changed:
                 event = build_privacy_event(
-                    camera_id, debouncer.pending_count or 0, occupied)
+                    camera_id, person_count, coarse_pose, occupied)
 
                 try:
                     response = requests.post(
@@ -875,17 +909,25 @@ def run_camera_privacy(camera_id, stream_url):
                         headers=_backend_headers(),
                     )
                     response.raise_for_status()
-                    debouncer.acknowledge()
                     print(f"[{camera_id}] occupancy -> {event['occupancy']} "
-                          f"(aggregate count={person_count})")
+                          f"(count={person_count}, pose={coarse_pose})")
 
                 except requests.RequestException as exc:
-                    # Keep the transition pending; the next frame retries it.
                     print(f"[{camera_id}] Aggregate backend request failed: {exc}")
 
+                if occupied and PRIVACY_SNAPSHOT_DIR:
+                    os.makedirs(PRIVACY_SNAPSHOT_DIR, exist_ok=True)
+                    snap_path = os.path.join(
+                        PRIVACY_SNAPSHOT_DIR,
+                        f"{camera_id}_{int(now)}.jpg",
+                    )
+                    # save_frame_snapshot blurs faces first; when MediaPipe
+                    # is absent it refuses to store and logs why.
+                    save_frame_snapshot(frame, snap_path)
+
             elif now - last_summary_time >= HEADLESS_LOG_INTERVAL:
-                print(f"[{camera_id}] privacy summary: aggregate_count={person_count}, "
-                      f"occupied={debouncer.occupied}")
+                print(f"[{camera_id}] privacy summary: count={person_count}, "
+                      f"pose={coarse_pose}, occupied={debouncer.occupied}")
                 last_summary_time = now
 
             # No preview window in privacy mode by design: showing the raw
