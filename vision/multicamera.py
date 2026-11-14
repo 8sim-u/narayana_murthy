@@ -120,6 +120,12 @@ MODEL_PATH = os.environ.get("WAMSS_MODEL_PATH", "yolov8n.pt")
 
 # The real backend /event endpoint (NOT the deprecated standalone bridge).
 BACKEND_URL = os.environ.get("WAMSS_BACKEND_URL", "http://localhost:8000/event")
+AGGREGATE_BACKEND_URL = os.environ.get("WAMSS_AGGREGATE_BACKEND_URL", "").strip()
+if not AGGREGATE_BACKEND_URL:
+    _backend_base = BACKEND_URL.rstrip("/")
+    if _backend_base.endswith("/event"):
+        _backend_base = _backend_base[:-len("/event")]
+    AGGREGATE_BACKEND_URL = _backend_base.rstrip("/") + "/event/aggregate"
 
 # Shared secret for the backend API key auth (docs/AUTH.md). Sent as the
 # X-API-Key header when set; when empty, auth stays disabled on the backend.
@@ -131,10 +137,9 @@ def _backend_headers():
     return {"X-API-Key": BACKEND_API_KEY} if BACKEND_API_KEY else {}
 
 
-# Privacy mode (WAMSS_PRIVACY_MODE=1): presence without identity.
-# Frames stay in memory and are never written to disk unblurred; the pipeline
-# emits person-count and coarse pose/occupancy aggregates only; no identity,
-# gaze, or recognition model may run. See "Privacy mode" in vision/README.md.
+# Privacy mode (WAMSS_PRIVACY_MODE=1): aggregate occupancy only.
+# Frames stay in memory and are never written to disk; only a person count and
+# occupancy transition leave the camera node. No identity, pose, or gaze data. See "Privacy mode" in vision/README.md.
 PRIVACY_MODE = _parse_bool(os.environ.get("WAMSS_PRIVACY_MODE"), False)
 
 # Occupancy debounce: seconds of sustained presence (person count > 0)
@@ -142,11 +147,6 @@ PRIVACY_MODE = _parse_bool(os.environ.get("WAMSS_PRIVACY_MODE"), False)
 # it reports "vacant" again.
 OCCUPANCY_DEBOUNCE_S = _parse_float(
     os.environ.get("WAMSS_OCCUPANCY_DEBOUNCE_S"), 5.0)
-
-# Optional directory for privacy-mode occupancy snapshots. Frames stored here
-# get faces blurred first (MediaPipe). If MediaPipe is absent, frames are NOT
-# stored and the reason is logged. Empty by default: no snapshots are stored.
-PRIVACY_SNAPSHOT_DIR = os.environ.get("WAMSS_PRIVACY_SNAPSHOT_DIR", "").strip()
 
 # Send detection events at most this often per camera, in seconds.
 EVENT_INTERVAL = _parse_float(os.environ.get("WAMSS_EVENT_INTERVAL"), 1.0)
@@ -165,8 +165,8 @@ HEADLESS_LOG_INTERVAL = 5.0
 
 
 # ---------------------------------------------------------------------------
-# Workstream 1 (Vision) edge extensions: face recognition, 2D room position,
-# per-track first-sighting snapshots, and dwell time.
+# Vision edge extensions: consent-scoped face recognition, 2D room position,
+# and dwell time. The active camera loop does not save first-sighting images.
 #
 # All of these are best-effort and degrade gracefully: when the optional
 # modules or their dependencies are missing, the pipeline keeps its
@@ -198,12 +198,12 @@ except ImportError:
     except ImportError:
         _identity_cache = None
 
-# Directory for first-sighting person snapshots (JPEG crops). Empty
-# disables snapshots entirely.
+# Retained for the legacy snapshot helper only. The active camera loop does
+# not save first-sighting person snapshots.
 SNAPSHOT_DIR = os.environ.get("WAMSS_SNAPSHOT_DIR", "data/snapshots").strip()
 
-# Face recognition on the non-privacy path. Requires an enrolled gallery
-# in vision/faces/; without a backend or gallery, names stay "unknown".
+# Face recognition on the non-privacy path. Requires a fresh, per-camera
+# consent allow-list from the backend; local sidecars never authorize a match.
 FACE_ID_ENABLED = _parse_bool(os.environ.get("WAMSS_FACE_ID"), True)
 
 # Optional 2D room calibration JSON (see vision/room_calib.py). Without it,
@@ -212,26 +212,17 @@ ROOM_CALIB_PATH = os.environ.get("WAMSS_ROOM_CALIB", "").strip()
 
 
 # ---------------------------------------------------------------------------
-# Gallery sync (Workstream 4): pick up dashboard enrollments without a
-# restart. The backend is the source of truth for the gallery (embeddings
-# live in its faces table); this node polls GET /faces/gallery/version and,
-# when the version changes, re-fetches GET /faces/gallery, writes the
-# entries as JSON sidecars into vision/faces/, and calls
-# face_id.reload_gallery() so the new names take effect.
-#
-# Sync is OFF unless a backend is explicitly configured: it needs either
-# WAMSS_GALLERY_BASE_URL, or WAMSS_BACKEND_URL set in the environment
-# (the built-in localhost default alone does not enable it). It never
-# runs in privacy mode and never blocks the camera loop: any HTTP or
-# disk failure is logged and the local gallery is kept.
+# Camera-scoped consent allow-list. The active loop requests the gallery for
+# each exact camera ID on a short refresh interval. It never writes the
+# response to local gallery sidecars, and any request error empties the
+# allow-list so a stale name cannot be emitted.
 # ---------------------------------------------------------------------------
 def _gallery_base_from_backend():
-    """Backend base URL for gallery sync, or "" when sync stays off.
+    """Backend base URL for the consent gallery, or "" when unavailable.
 
     Derived from WAMSS_BACKEND_URL only when that variable was explicitly
-    set; the built-in localhost default does not enable polling on its
-    own. A trailing "/event" is stripped (BACKEND_URL points at the event
-    endpoint, the gallery lives at the same base).
+    set; the built-in localhost default does not enable identity on its own.
+    A trailing "/event" is stripped because the gallery lives at the same base.
     """
     raw = os.environ.get("WAMSS_BACKEND_URL", "").strip()
     if not raw:
@@ -241,9 +232,11 @@ def _gallery_base_from_backend():
     return raw.rstrip("/")
 
 
-# Seconds between gallery version polls. 0 disables sync.
-GALLERY_POLL_SECONDS = _parse_float(
-    os.environ.get("WAMSS_GALLERY_POLL_SECONDS"), 30.0)
+# Seconds between camera-scoped consent gallery refreshes.
+# A failed request clears the local allow-list, so a stale cached identity
+# cannot be emitted after consent withdrawal or loss of backend connectivity.
+CONSENT_POLL_SECONDS = max(0.1, _parse_float(
+    os.environ.get("WAMSS_CONSENT_POLL_SECONDS"), 1.0))
 
 # Explicit gallery base URL, e.g. http://192.168.1.20:8000. Overrides the
 # derivation from WAMSS_BACKEND_URL. Empty means "derive or stay off".
@@ -257,9 +250,9 @@ GALLERY_BASE_URL = os.environ.get("WAMSS_GALLERY_BASE_URL", "").strip() \
 # DISK-WRITE AUDIT (2026-10-30, privacy round): this file previously contained
 # no cv2.imwrite, cv2.VideoWriter, or snapshot code at all, so there was
 # nothing to remove. Every frame-persistence call in this file now goes
-# through save_frame_snapshot(), which refuses to write in privacy mode
-# unless faces are blurred first (and refuses entirely when MediaPipe is
-# absent). Keep it that way: never add a raw cv2.imwrite to this file.
+# through save_frame_snapshot(). Privacy mode refuses all frame writes; the
+# aggregate pipeline never stores snapshots. Keep it that way: never add a raw
+# cv2.imwrite to the privacy path.
 #
 # PRIVACY GUARANTEE (do not remove): identity, gaze, and face-recognition
 # models are forbidden in this pipeline. Presence ("someone is here") must
@@ -272,16 +265,14 @@ GALLERY_BASE_URL = os.environ.get("WAMSS_GALLERY_BASE_URL", "").strip() \
 # never imports or calls them, never constructs an IdentityCache, and
 # "face_recognition" is not in _PRIVACY_ALLOWED_MODELS, so requesting it in
 # privacy mode would raise.
-# Workstream 4 note: the gallery sync (GalleryRefresher, built only by
-# _build_gallery_refresher on the non-privacy path) is covered by the same
-# rule: _build_gallery_refresher returns None in privacy mode, and the
-# refresher itself refuses to poll when privacy_mode is True, so privacy
-# mode performs no face identification and no gallery network fetch.
+# The legacy GalleryRefresher is not constructed by the camera loop; the
+# active CameraGallery path is also absent in privacy mode, which performs
+# no face identification and no gallery network fetch.
 # ---------------------------------------------------------------------------
 
 _PRIVACY_ALLOWED_MODELS = (
-    "person_pose",            # coarse pose landmarks, no identity
-    "face_detection_blur_only",  # face boxes used ONLY to blur, never stored
+    "face_detection_count_only",  # detection count only; no boxes leave the node
+    "face_detection_blur_only",   # legacy in-memory helper; never used for privacy storage
 )
 
 
@@ -305,10 +296,14 @@ class OccupancyDebouncer:
     def __init__(self, debounce_s=5.0):
         self.debounce_s = float(debounce_s)
         self.occupied = False
-        self._since = None  # when the current streak away from state began
+        self._since = None
+        self._pending = None
+        self.pending_count = None
 
     def update(self, person_count, now):
-        """Feed a new count. Returns (occupied, changed)."""
+        """Return a pending transition until acknowledge() confirms delivery."""
+        if self._pending is not None:
+            return self._pending, True
         want_occupied = person_count > 0
         if want_occupied == self.occupied:
             self._since = None
@@ -316,10 +311,19 @@ class OccupancyDebouncer:
         if self._since is None:
             self._since = now
         if now - self._since >= self.debounce_s:
-            self.occupied = want_occupied
-            self._since = None
-            return self.occupied, True
+            self._pending = want_occupied
+            self.pending_count = max(0, int(person_count)) if want_occupied else 0
+            return self._pending, True
         return self.occupied, False
+
+    def acknowledge(self):
+        """Commit the pending state only after the aggregate POST succeeds."""
+        if self._pending is None:
+            return
+        self.occupied = self._pending
+        self._pending = None
+        self.pending_count = None
+        self._since = None
 
 
 def blur_faces(frame):
@@ -358,21 +362,10 @@ def blur_faces(frame):
 
 
 def save_frame_snapshot(frame, path):
-    """Store a frame to disk, privacy-safe. Returns True when written.
-
-    Privacy mode: faces are blurred first via MediaPipe. If MediaPipe is
-    absent the frame is NOT stored and the reason is logged (returns False).
-    Outside privacy mode: stored as-is (existing behaviour preserved).
-    """
+    """Store a non-privacy-mode frame. Privacy mode always refuses snapshots."""
     if PRIVACY_MODE:
-        blurred, ok = blur_faces(frame)
-        if not ok:
-            print(f"[privacy] snapshot NOT stored ({path}): face blurring "
-                  f"is unavailable without mediapipe")
-            return False
-        cv2.imwrite(path, blurred)
-        print(f"[privacy] anonymized snapshot stored: {path}")
-        return True
+        print("[privacy] snapshot NOT stored: privacy mode permits aggregate data only")
+        return False
     cv2.imwrite(path, frame)
     return True
 
@@ -391,15 +384,16 @@ def _load_room_calibration():
         return None
 
 
-def _identify_crop_scored(frame, bbox):
+def _identify_crop_scored(frame, bbox, gallery_entries=None):
     """Best-effort (name, confidence) for a bbox crop.
 
     Returns ("unknown", None) when face recognition is disabled or
-    unavailable, when no face matches, or on any failure. Confidence is
-    a float in 0..1 for a match. Falls back to the name-only identify()
-    (confidence None) for face_id modules without identify_with_confidence.
+    unavailable, when no camera-authorized gallery is supplied, when no face
+    matches, or on any failure. Confidence is a float in 0..1 for a match.
+    Legacy matchers that cannot accept a restricted gallery are not used.
     """
-    if _face_id is None or not FACE_ID_ENABLED:
+    if (_face_id is None or not FACE_ID_ENABLED
+            or not gallery_entries):
         return "unknown", None
     try:
         h, w = frame.shape[:2]
@@ -411,181 +405,118 @@ def _identify_crop_scored(frame, bbox):
         crop = frame[y1:y2, x1:x2]
         identify_scored = getattr(_face_id, "identify_with_confidence", None)
         if callable(identify_scored):
-            return identify_scored(crop)
-        return _face_id.identify(crop), None
+            return identify_scored(crop, gallery_entries=gallery_entries)
+        return "unknown", None
     except Exception:
         return "unknown", None
 
 
-def _sanitize_gallery_name(name):
-    """Filesystem-safe gallery filename stem, mirroring enroll_face.py."""
-    safe = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
-    return safe or "unnamed"
-
-
 class GalleryRefresher:
-    """Poll the backend gallery version and sync new enrollments to disk.
+    """Deprecated, unscoped gallery API retained as an inert compatibility shim.
 
-    The backend serves GET /faces/gallery/version ({"version": N, ...})
-    and GET /faces/gallery ([{"name": ..., "embedding": [...]}, ...]).
-    On a version change this writes one JSON sidecar per entry into the
-    vision gallery dir (the format face_id._load_gallery reads) and calls
-    face_id.reload_gallery(). Entries with no embedding (the backend
-    stores a placeholder when no face library was available) are skipped:
-    they cannot match anything. Sidecars this refresher previously wrote
-    for names absent from the new gallery are deleted, so a dashboard
-    delete takes effect; files it did not write are never touched.
-
-    Never raises and never stalls the caller: every HTTP, JSON, or disk
-    failure is logged and the local gallery is kept. A failed poll does
-    not advance the seen version, so the next due poll retries. Never
-    runs in privacy mode: enabled is False when privacy_mode is True,
-    and run_camera_privacy never constructs one.
+    The active camera loop uses CameraGallery, whose backend request is scoped
+    to a camera and whose entries are filtered by active employee consent.
     """
 
     def __init__(self, base_url, poll_seconds=30.0, face_id_module=None,
                  http_get=None, privacy_mode=False):
         self.base_url = (base_url or "").rstrip("/")
-        try:
-            self.poll_seconds = float(poll_seconds)
-        except (TypeError, ValueError):
-            self.poll_seconds = 30.0
+        self.poll_seconds = poll_seconds
         self._face_id = face_id_module
-        self._http_get = http_get  # injectable for tests; else requests.get
+        self._http_get = http_get
         self._privacy_mode = bool(privacy_mode)
-        self._last_version = None
-        self._last_poll = None
-        self._managed = {}  # sidecar filename -> person name
 
     @property
     def enabled(self):
-        return (not self._privacy_mode and self.poll_seconds > 0
-                and bool(self.base_url) and self._face_id is not None)
+        return False
 
     def maybe_refresh(self, now):
-        """Poll when due. Returns True when the gallery was reloaded."""
-        if not self.enabled:
-            return False
-        if (self._last_poll is not None
+        return False
+
+
+class CameraGallery:
+    """Live allow-list from the backend for one camera.
+
+    The backend filters names and embeddings by active employee consent and
+    camera mode. Errors clear the allow-list (fail closed); a successful
+    refresh is required before a cached name can be emitted.
+    """
+
+    def __init__(self, camera_id, base_url, poll_seconds=1.0, http_get=None):
+        self.camera_id = str(camera_id)
+        self.base_url = (base_url or "").rstrip("/")
+        self.poll_seconds = max(0.1, float(poll_seconds))
+        self._http_get = http_get
+        self._last_poll = None
+        self.entries = []
+
+    def maybe_refresh(self, now, force=False):
+        if not self.base_url:
+            changed = bool(self.entries)
+            self.entries = []
+            return changed
+        if (not force and self._last_poll is not None
                 and now - self._last_poll < self.poll_seconds):
             return False
         self._last_poll = now
+        old_key = self._key(self.entries)
         try:
-            version = self._fetch_version()
-        except Exception as exc:
-            print(f"[gallery] version poll failed ({exc}); keeping "
-                  f"local gallery")
-            return False
-        if version == self._last_version:
-            return False
-        try:
-            entries = self._fetch_gallery()
-            payloads = self._validate(entries)
-        except Exception as exc:
-            print(f"[gallery] gallery fetch failed ({exc}); keeping "
-                  f"local gallery")
-            return False
-        try:
-            self._apply(payloads)
-        except Exception as exc:
-            print(f"[gallery] gallery apply failed ({exc}); keeping "
-                  f"local gallery")
-            return False
-        self._last_version = version
-        return True
-
-    def _get(self, path):
-        get = self._http_get if self._http_get is not None else requests.get
-        response = get(self.base_url + path, timeout=2.0,
-                       headers=_backend_headers())
-        response.raise_for_status()
-        return response
-
-    def _fetch_version(self):
-        data = self._get("/faces/gallery/version").json()
-        version = data.get("version") if isinstance(data, dict) else None
-        if not isinstance(version, int) or isinstance(version, bool):
-            raise ValueError(
-                "gallery version response has no integer version")
-        return version
-
-    def _fetch_gallery(self):
-        data = self._get("/faces/gallery").json()
-        if not isinstance(data, list):
-            raise ValueError("gallery response is not a list")
-        return data
-
-    def _validate(self, entries):
-        """Validated (filename, payload) pairs; skips unmatchable entries."""
-        payloads = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            embedding = entry.get("embedding")
-            if (not name or not isinstance(name, str)
-                    or not isinstance(embedding, list) or not embedding):
-                continue
-            try:
-                vector = [float(v) for v in embedding]
-            except (TypeError, ValueError):
-                continue
-            filename = _sanitize_gallery_name(name) + ".json"
-            payloads.append((filename, {
-                "name": name,
-                "method": "insightface",
-                "embedding": vector,
-                "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                             time.gmtime()),
-                "source": "backend-sync",
-            }))
-        return payloads
-
-    def _apply(self, payloads):
-        gallery_dir = self._face_id.GALLERY_DIR
-        os.makedirs(gallery_dir, exist_ok=True)
-        seen = set()
-        for filename, payload in payloads:
-            path = os.path.join(gallery_dir, filename)
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
-            seen.add(filename)
-            self._managed[filename] = payload["name"]
-        removed = 0
-        for filename in list(self._managed):
-            if filename not in seen:
+            get = self._http_get if self._http_get is not None else requests.get
+            response = get(
+                self.base_url + "/faces/gallery",
+                params={"camera_id": self.camera_id},
+                timeout=2.0,
+                headers=_backend_headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, list):
+                raise ValueError("camera gallery response is not a list")
+            entries = []
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                name, embedding = entry.get("name"), entry.get("embedding")
+                if (not isinstance(name, str) or not name.strip()
+                        or not isinstance(embedding, list) or not embedding):
+                    continue
                 try:
-                    os.remove(os.path.join(gallery_dir, filename))
-                    removed += 1
-                except OSError as exc:
-                    print(f"[gallery] WARNING: could not remove stale "
-                          f"sidecar {filename}: {exc}")
-                del self._managed[filename]
-        self._face_id.reload_gallery()
-        print(f"[gallery] synced {len(payloads)} entries, removed "
-              f"{removed} stale")
+                    vector = [float(value) for value in embedding]
+                except (TypeError, ValueError):
+                    continue
+                entries.append({
+                    "name": name.strip(),
+                    "embedding": vector,
+                    "method": "insightface",
+                })
+            self.entries = entries
+        except Exception as exc:
+            print(f"[consent] camera gallery unavailable for "
+                  f"{self.camera_id}; identification disabled ({type(exc).__name__})")
+            self.entries = []
+        return old_key != self._key(self.entries)
+
+    @staticmethod
+    def _key(entries):
+        return tuple(sorted(
+            (entry.get("name", ""), tuple(entry.get("embedding", [])))
+            for entry in entries
+        ))
 
 
 def _build_gallery_refresher():
-    """Gallery sync for the non-privacy path, or None when disabled.
+    """Legacy unscoped gallery sync is disabled for consent safety.
 
-    Disabled when privacy mode is on, face recognition is off, no
-    gallery base URL is configured, polling is set to 0, or face_id is
-    unavailable.
+    run_camera() uses CameraGallery, which fetches a camera-specific allow-list
+    and clears it when the backend is unavailable.
     """
-    if PRIVACY_MODE or not FACE_ID_ENABLED:
-        return None
-    if not GALLERY_BASE_URL or GALLERY_POLL_SECONDS <= 0:
-        return None
-    if _face_id is None:
-        return None
-    return GalleryRefresher(GALLERY_BASE_URL, GALLERY_POLL_SECONDS,
-                            _face_id, privacy_mode=PRIVACY_MODE)
+    return None
 
 
 def _build_person_event(camera_id, track_key, person_name, name_confidence,
                         position_x, position_y, snapshot_path,
-                        dwell_seconds, max_confidence):
+                        dwell_seconds, max_confidence,
+                        position_bounds=(1.0, 1.0)):
     """One per-person detection event for the backend /event endpoint.
 
     person_name_confidence is the smoothed face-match confidence in 0..1,
@@ -598,6 +529,7 @@ def _build_person_event(camera_id, track_key, person_name, name_confidence,
         "person_name_confidence": name_confidence,
         "position_x": float(position_x),
         "position_y": float(position_y),
+        "position_bounds": [float(v) for v in position_bounds],
         "snapshot_path": snapshot_path,
         "dwell_seconds": float(dwell_seconds),
         "objects": ["person"],
@@ -641,32 +573,24 @@ def _save_person_snapshot(frame, bbox, track_key, snapshots):
 
 
 class PrivacyDetector:
-    """Privacy-mode presence pipeline: MediaPipe on-device, aggregates only.
+    """Privacy-mode presence pipeline: on-device count only, no person records.
 
-    MediaPipe installed: FaceDetection (on-device BlazeFace) counts people
-    and Pose gives a coarse standing/sitting aggregate. Neither produces
-    embeddings, identities, or gaze. MediaPipe absent: graceful fallback to
-    the YOLO person-class path, emitting counts only (track ids dropped).
-    Frames are processed in memory and never written to disk by this class.
+    MediaPipe counts face detections locally; the fallback counts YOLO person
+    detections. Neither sends boxes, pose, tracks, or frames off the node.
+    Frames remain in memory and are never written to disk by this class.
     """
 
     def __init__(self):
         self.backend = None  # "mediapipe" | "yolo_fallback"
         self._mp_face = None
-        self._mp_pose = None
         self._yolo = None
         if mp is not None:
-            _assert_privacy_model_allowed("face_detection_blur_only")
-            _assert_privacy_model_allowed("person_pose")
+            _assert_privacy_model_allowed("face_detection_count_only")
             self._mp_face = mp.solutions.face_detection.FaceDetection(
                 model_selection=1, min_detection_confidence=0.5)
-            self._mp_pose = mp.solutions.pose.Pose(
-                static_image_mode=False,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5)
             self.backend = "mediapipe"
-            print("[privacy] MediaPipe backend active (on-device face "
-                  "detection + pose; no identity, no gaze)")
+            print("[privacy] MediaPipe face-count backend active; "
+                  "no identity, pose, or gaze data is generated")
         else:
             # Graceful fallback: same YOLO weights, but only the person
             # count is used. No track ids, no boxes leave this class.
@@ -677,47 +601,22 @@ class PrivacyDetector:
                   "no pose)")
 
     def detect(self, frame):
-        """Return (person_count, coarse_pose) from a BGR frame, in memory."""
+        """Return only an in-memory person count; no pose or identity is retained."""
         if self._mp_face is not None:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             face_res = self._mp_face.process(rgb)
-            count = len(face_res.detections) if face_res.detections else 0
-            pose = self._coarse_pose(rgb) if count > 0 else "unknown"
-            return count, pose
+            return len(face_res.detections) if face_res.detections else 0
         results = self._yolo(frame, classes=[0], conf=0.45, verbose=False)
         boxes = results[0].boxes
-        return (len(boxes) if boxes is not None else 0), "unknown"
-
-    def _coarse_pose(self, rgb):
-        """Best-effort standing/sitting/unknown from pose landmarks."""
-        try:
-            res = self._mp_pose.process(rgb)
-            if not res.pose_landmarks:
-                return "unknown"
-            lm = res.pose_landmarks.landmark
-            # MediaPipe pose indices: 11/12 shoulders, 23/24 hips, 27/28
-            # ankles. Standing when the leg segment is long relative to the
-            # torso; sitting when it is short. Coarse aggregate only.
-            shoulder_y = (lm[11].y + lm[12].y) / 2
-            hip_y = (lm[23].y + lm[24].y) / 2
-            ankle_y = (lm[27].y + lm[28].y) / 2
-            torso = abs(shoulder_y - hip_y)
-            leg = abs(hip_y - ankle_y)
-            if torso <= 0:
-                return "unknown"
-            return "standing" if leg > 0.6 * torso else "sitting"
-        except Exception:
-            return "unknown"
+        return len(boxes) if boxes is not None else 0
 
 
-def build_privacy_event(camera_id, person_count, coarse_pose, occupied):
-    """Aggregate-only occupancy event. Never contains a track id."""
+def build_privacy_event(camera_id, person_count, occupied):
+    """Aggregate-only occupancy event. Never contains identity or pose fields."""
     return {
         "camera_id": camera_id,
         "occupancy": "occupied" if occupied else "vacant",
         "person_count": int(person_count),
-        "pose": coarse_pose,
-        "privacy_mode": True,
     }
 
 
@@ -728,25 +627,25 @@ def run_camera(camera_id, stream_url):
     last_summary_time = 0.0
     frame_no = 0
 
-    # Workstream 1 state: per-track first-seen times (dwell time),
-    # first-sighting snapshot paths, and the optional room calibration.
+    # Per-track first-seen times (dwell time) and optional room calibration.
     first_seen = {}
     snapshots = {}
     calib = _load_room_calibration()
 
-    # Per-track identity cache (vision/identity_cache.py): identifies every
-    # tracked person on first sight, re-verifies periodically, and smooths
-    # names with majority voting. None when the module is unavailable or
-    # face recognition is disabled; the event loop then falls back to a
-    # direct per-event identify call, as before.
-    identity = None
-    if _identity_cache is not None and FACE_ID_ENABLED:
-        identity = _identity_cache.IdentityCache(_identify_crop_scored)
+    # Per-camera allow-list: an absent backend/configuration means no identity
+    # matching, even if an old local gallery happens to exist.
+    camera_gallery = (CameraGallery(
+        camera_id, GALLERY_BASE_URL, CONSENT_POLL_SECONDS)
+        if FACE_ID_ENABLED and not PRIVACY_MODE else None)
 
-    # Gallery sync (Workstream 4): dashboard enrollments reach this node
-    # without a restart. None when disabled; never built in privacy mode
-    # (run_camera_privacy is a separate loop that never touches it).
-    gallery_refresher = _build_gallery_refresher()
+    # Per-track identity cache (vision/identity_cache.py): identifies only
+    # against the camera's current allow-list, re-verifies periodically, and
+    # smooths names with majority voting. No unrestricted fallback exists.
+    identity = None
+    if _identity_cache is not None and camera_gallery is not None:
+        identity = _identity_cache.IdentityCache(
+            lambda frame, bbox: _identify_crop_scored(
+                frame, bbox, gallery_entries=camera_gallery.entries))
 
     if not cap.isOpened():
         print(f"[{camera_id}] ERROR: Cannot open camera stream")
@@ -776,18 +675,18 @@ def run_camera(camera_id, stream_url):
             boxes = results[0].boxes
             now = time.time()
 
-            # Gallery sync check: cheap time comparison per frame; the
-            # HTTP poll itself runs at most every GALLERY_POLL_SECONDS
-            # and never raises (failures log and keep the local gallery).
-            if gallery_refresher is not None:
-                gallery_refresher.maybe_refresh(now)
+            # Refresh active camera consent before any new identity lookup.
+            # A change (including an error/revocation) clears sticky track
+            # names so none can survive beyond the current authorization.
+            if camera_gallery is not None:
+                if camera_gallery.maybe_refresh(now) and identity is not None:
+                    identity.reset()
 
             person_count = len(boxes) if boxes is not None else 0
 
             # Per-frame per-track bookkeeping: first-seen timestamps for
-            # dwell time, a first-sighting snapshot for each new track, and
-            # an identity observation (identify on first sight, then
-            # re-verify periodically; see vision/identity_cache.py).
+            # dwell time and an identity observation (identify on first sight,
+            # then re-verify periodically; see vision/identity_cache.py).
             # Best-effort; failures here never stop the pipeline.
             if boxes is not None and boxes.id is not None:
                 track_ids = boxes.id.cpu().tolist()
@@ -796,11 +695,11 @@ def run_camera(camera_id, stream_url):
                     track_key = f"Person {int(tid)}"
                     if track_key not in first_seen:
                         first_seen[track_key] = now
-                        _save_person_snapshot(frame, tbox, track_key,
-                                              snapshots)
-                    if identity is not None:
+                    if identity is not None and camera_gallery.entries:
                         identity.observe(track_key, frame, tbox,
                                          frame_no, now)
+                    elif identity is not None:
+                        identity.reset()
 
             # Send one event per tracked person when the interval allows.
             # Previously only the first box was reported; every person in
@@ -820,6 +719,12 @@ def run_camera(camera_id, stream_url):
                     pairs = [("unknown", track_boxes[0])]
 
                 frame_h, frame_w = frame.shape[:2]
+                if camera_gallery is not None:
+                    if camera_gallery.maybe_refresh(now, force=True) and identity is not None:
+                        identity.reset()
+                allowed_names = ({entry["name"].casefold()
+                                  for entry in camera_gallery.entries}
+                                 if camera_gallery is not None else set())
                 for track_key, bbox in pairs:
                     if _room_calib is not None:
                         position_x, position_y = _room_calib.map_position(
@@ -832,20 +737,33 @@ def run_camera(camera_id, stream_url):
                         position_x = min(1.0, max(0.0,
                                                   ((x1 + x2) / 2) / frame_w))
                         position_y = min(1.0, max(0.0, (y2 - y1) / frame_h))
+                    position_bounds = (
+                        calib.get("room_size", (1.0, 1.0))
+                        if isinstance(calib, dict) else (1.0, 1.0)
+                    )
 
                     dwell_seconds = now - first_seen.get(track_key, now)
 
                     if identity is not None and track_key != "unknown":
                         person_name, name_conf = identity.identity(track_key)
-                    else:
+                    elif camera_gallery is not None and camera_gallery.entries:
                         person_name, name_conf = _identify_crop_scored(
-                            frame, bbox)
+                            frame, bbox,
+                            gallery_entries=camera_gallery.entries)
+                    else:
+                        person_name, name_conf = "unknown", None
+
+                    if (not person_name
+                            or person_name.casefold() not in allowed_names):
+                        # Anonymous or unconsented tracks are never POSTed as
+                        # person events and cannot create movement or alerts.
+                        continue
 
                     event = _build_person_event(
                         camera_id, track_key, person_name, name_conf,
                         position_x, position_y,
-                        snapshots.get(track_key),
-                        dwell_seconds, max_conf)
+                        None,
+                        dwell_seconds, max_conf, position_bounds)
 
                     try:
                         response = requests.post(
@@ -942,40 +860,32 @@ def run_camera_privacy(camera_id, stream_url):
                 continue
 
             now = time.time()
-            person_count, coarse_pose = detector.detect(frame)
+            person_count = detector.detect(frame)
             occupied, changed = debouncer.update(person_count, now)
 
             if changed:
                 event = build_privacy_event(
-                    camera_id, person_count, coarse_pose, occupied)
+                    camera_id, debouncer.pending_count or 0, occupied)
 
                 try:
                     response = requests.post(
-                        BACKEND_URL,
+                        AGGREGATE_BACKEND_URL,
                         json=event,
                         timeout=2.0,
                         headers=_backend_headers(),
                     )
                     response.raise_for_status()
+                    debouncer.acknowledge()
                     print(f"[{camera_id}] occupancy -> {event['occupancy']} "
-                          f"(count={person_count}, pose={coarse_pose})")
+                          f"(aggregate count={person_count})")
 
                 except requests.RequestException as exc:
-                    print(f"[{camera_id}] Backend request failed: {exc}")
-
-                if occupied and PRIVACY_SNAPSHOT_DIR:
-                    os.makedirs(PRIVACY_SNAPSHOT_DIR, exist_ok=True)
-                    snap_path = os.path.join(
-                        PRIVACY_SNAPSHOT_DIR,
-                        f"{camera_id}_{int(now)}.jpg",
-                    )
-                    # save_frame_snapshot blurs faces first; when MediaPipe
-                    # is absent it refuses to store and logs why.
-                    save_frame_snapshot(frame, snap_path)
+                    # Keep the transition pending; the next frame retries it.
+                    print(f"[{camera_id}] Aggregate backend request failed: {exc}")
 
             elif now - last_summary_time >= HEADLESS_LOG_INTERVAL:
-                print(f"[{camera_id}] privacy summary: count={person_count}, "
-                      f"pose={coarse_pose}, occupied={debouncer.occupied}")
+                print(f"[{camera_id}] privacy summary: aggregate_count={person_count}, "
+                      f"occupied={debouncer.occupied}")
                 last_summary_time = now
 
             # No preview window in privacy mode by design: showing the raw
@@ -999,14 +909,14 @@ def main():
     print(f"[config] Event interval: {EVENT_INTERVAL}s, headless: {HEADLESS}")
     print(f"[config] Privacy mode: {PRIVACY_MODE}"
           + (f" (debounce={OCCUPANCY_DEBOUNCE_S}s)" if PRIVACY_MODE else ""))
-    print(f"[config] Face ID: {FACE_ID_ENABLED}, snapshots: "
-          f"{SNAPSHOT_DIR or 'disabled'}, room calibration: "
+    print(f"[config] Face ID: {FACE_ID_ENABLED}, camera-loop snapshots: disabled, "
+          f"room calibration: "
           f"{ROOM_CALIB_PATH or 'none'}")
     if not PRIVACY_MODE:
-        print(f"[config] Gallery sync: "
+        print(f"[config] Camera consent gallery: "
               f"{GALLERY_BASE_URL or 'disabled'}"
-              + (f" (poll {GALLERY_POLL_SECONDS}s)"
-                 if GALLERY_BASE_URL else ""))
+              + (f" (refresh {CONSENT_POLL_SECONDS}s)"
+                 if GALLERY_BASE_URL else " (identity unavailable)"))
 
     threads = []
 

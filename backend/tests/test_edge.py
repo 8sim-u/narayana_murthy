@@ -17,6 +17,7 @@ from app import edge
 from app.database import SessionLocal
 from app.main import app
 from app.models import DetectionEvent
+from camera_test_utils import grant_camera_consent
 
 client = TestClient(app)
 
@@ -26,6 +27,9 @@ def _cam(prefix="CAM_EDGE"):
 
 
 def _post_event(payload):
+    name = payload.get("person_name")
+    if isinstance(name, str) and name.strip().casefold() != "unknown":
+        grant_camera_consent(name, payload["camera_id"])
     resp = client.post("/event", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -296,11 +300,13 @@ def test_occupancy_total_when_camera_omitted():
 
 
 def test_face_enroll_list_and_gallery():
-    """Enroll stores the face and it shows up in /faces and /faces/gallery."""
+    """Enrollment is consent-scoped; unmatchable photos are not in any gallery."""
     name = f"Test Person {uuid.uuid4().hex[:6]}"
+    camera_id = _cam("CAM_ENROLL")
+    grant_camera_consent(name, camera_id)
     resp = client.post(
         "/faces/enroll",
-        data={"name": name},
+        data={"name": name, "camera_id": camera_id},
         files={"photo": ("face.jpg", b"\xff\xd8\xff fake-jpeg-bytes", "image/jpeg")},
     )
     assert resp.status_code == 200, resp.text
@@ -313,17 +319,19 @@ def test_face_enroll_list_and_gallery():
     faces = client.get("/faces").json()
     assert any(f["name"] == name and "enrolled_at" in f for f in faces)
 
-    gallery = client.get("/faces/gallery").json()
+    gallery = client.get("/faces/gallery", params={"camera_id": camera_id}).json()
     match = [g for g in gallery if g["name"] == name]
-    assert len(match) == 1
-    assert match[0]["embedding"] is None
+    assert match == []
 
 
 def test_face_enroll_rejects_empty_photo():
     """An empty upload is rejected with 400, never a 500."""
+    name = f"Nobody {uuid.uuid4().hex[:6]}"
+    camera_id = _cam("CAM_ENROLL")
+    grant_camera_consent(name, camera_id)
     resp = client.post(
         "/faces/enroll",
-        data={"name": "Nobody"},
+        data={"name": name, "camera_id": camera_id},
         files={"photo": ("empty.jpg", b"", "image/jpeg")},
     )
     assert resp.status_code == 400

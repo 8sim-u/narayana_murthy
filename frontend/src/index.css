@@ -829,3 +829,41 @@ tr.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
   .spec-list li { flex-direction: column; gap: 2px; }
   .mast-status span:last-child { display: none; }
 }
+
+/* Employee-owned wellness cards: calm, compact, and readable on phones. */
+.wellness-stack { display: grid; gap: 16px; }
+.wellness-intro p, .wellness-breathing p, .wellness-prediction p { color: var(--text-2); }
+.wellness-connect { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.wellness-connect .field { min-width: 150px; flex: 1; }
+.wellness-privacy-note { color: var(--text-2); font-size: 13px; max-width: 85ch; }
+.wellness-consent-box { display: grid; gap: 12px; }
+.wellness-consent-box p { margin: 0; }
+.wellness-breathing { border: 1px solid var(--rule); border-radius: 10px; padding: 18px; margin: 18px 0; display: flex; gap: 18px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.breathing-stage { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.breathing-circle { width: 66px; height: 66px; border-radius: 50%; background: var(--ice-soft); border: 2px solid var(--ice); flex: none; }
+.breathing-circle.is-inhale { animation: wellness-inhale 4s ease-in-out infinite; }
+.breathing-circle.is-exhale { animation: wellness-exhale 6s ease-in-out infinite; }
+@keyframes wellness-inhale { 0%, 100% { transform: scale(.78); } 50% { transform: scale(1.12); } }
+@keyframes wellness-exhale { 0%, 100% { transform: scale(1.12); } 50% { transform: scale(.78); } }
+.wellness-prediction, .wellness-manager-prompt { padding: 14px 0; border-top: 1px solid var(--rule); }
+.wellness-prediction h3 { margin: 0 0 5px; font-family: var(--font-display); font-size: 16px; }
+.wellness-prediction p, .wellness-manager-prompt p { margin: 6px 0; }
+.wellness-manager-prompt { border-left: 3px solid var(--warn); padding-left: 14px; }
+.btn-danger { color: var(--bad); border-color: var(--bad); }
+@media (max-width: 680px) {
+  .wellness-connect { align-items: stretch; }
+  .wellness-connect .field { min-width: min(100%, 170px); }
+  .wellness-breathing { align-items: flex-start; }
+  .wellness-breathing > .btn, .breathing-stage { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .breathing-circle.is-inhale, .breathing-circle.is-exhale { animation: none; }
+}
+
+.wellness-hrv-chart { margin: 18px 0; padding: 16px; border: 1px solid var(--rule); border-radius: 10px; }
+.wellness-chart-scroll { overflow-x: auto; }
+.wellness-chart { display: block; width: 100%; min-width: 420px; max-height: 260px; }
+.wellness-chart-grid { stroke: var(--rule); stroke-width: 1; }
+.wellness-chart-line { stroke: var(--ice); stroke-width: 3; }
+.wellness-chart-point { fill: var(--ice); stroke: var(--paper); stroke-width: 2; }
+.wellness-chart-label { fill: var(--text-2); font-size: 10px; }

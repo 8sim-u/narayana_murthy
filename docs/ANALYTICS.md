@@ -78,6 +78,45 @@ rows plus counts of `green / amber / red / unknown` strain levels. Team
 rollup: mean of per-employee weekly averages and summed level counts.
 Strain is a heuristic workload signal, not a medical measure.
 
+These trend rows summarize observed history and do not themselves forecast
+slumps, bottlenecks, or causes. A separate, employee-private activity advisory
+is available in `GET /wellness/me`; it uses no health or task-count data. See
+[Private activity advisory](#private-activity-advisory) and
+[WELLNESS_PRIVACY.md](WELLNESS_PRIVACY.md). The rule is transparent and
+unvalidated, not a performance measure. Team analytics still do not grant
+manager access to individual history; unscoped person-level views remain
+disabled. The separate `/wellness/manager-checkins` endpoint is limited to a
+server-mapped manager token and exact roster, and requires each employee's
+additional explicit opt-in; it returns only a fixed supportive prompt and the
+employee ID. It does not authorize broader attendance, geofence, identity,
+snapshot, event, or personal-history views.
+
+### Private activity advisory
+
+`GET /wellness/me` requires the employee's `X-Employee-Token` and returns
+predictions only for the employee ID resolved from that token. The active-time
+advisory uses daily active minutes already present in activity records and the
+existing workstation-activity consent. It does not add collection, require
+optional wellness consent, expose app/window details, or use health signals.
+
+The rule uses the three latest completed Monday-Sunday weeks in
+`WAMSS_TIMEZONE`. Each window must contain at least four days with recorded
+active minutes. Let `recent` be the latest window's mean active
+minutes/day, `previous` the prior week's mean, and `baseline` the average of the
+two preceding weekly means. An advisory appears only when `recent` is at least
+10% below `previous` and at least 20% below `baseline`. Its visible reason gives
+the date range, averages, observed-day counts, and thresholds. It describes a
+possible continuation of lower recorded active time in the next 7 days; it is
+not a validated forecast, performance rating, or explanation of cause.
+
+The employee can submit `POST /wellness/prediction-feedback` with the current
+prediction key and a false-positive choice. The server takes the owner from the
+same employee token, accepts only a currently generated key, and stores one
+feedback row per employee and prediction. The personal view shows whether the
+hint was marked false positive and the employee's recent report count. The
+existing `WAMSS_RETENTION_DAYS` purge removes feedback with other retained
+records; it is never exposed through team trends or manager views.
+
 Example:
 
 ```

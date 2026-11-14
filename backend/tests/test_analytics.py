@@ -2,6 +2,8 @@
 dedicated test FastAPI app, per the agent-4 contract)."""
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -28,6 +30,15 @@ def _make_client() -> TestClient:
     app.include_router(analytics_router)
     app.dependency_overrides[get_db] = _override_get_db
     return TestClient(app)
+
+
+def _employee_headers(monkeypatch, employee_id: str):
+    token = f"analytics-test-token:{employee_id}"
+    monkeypatch.setenv(
+        "WAMSS_EMPLOYEE_TOKEN_HASHES",
+        json.dumps({employee_id: hashlib.sha256(token.encode()).hexdigest()}),
+    )
+    return {"X-Employee-Token": token}
 
 
 def _cleanup(db):
@@ -91,13 +102,16 @@ def _week_start(d: date) -> date:
     return d - timedelta(days=6)
 
 
-def test_focus_trends_math():
+def test_focus_trends_math(monkeypatch):
     db = SessionLocal()
     emp_focus, _ = _seed(db)
     db.close()
 
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "focus", "weeks": 2})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "focus", "weeks": 2},
+        headers=_employee_headers(monkeypatch, emp_focus),
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["metric"] == "focus"
@@ -110,6 +124,7 @@ def test_focus_trends_math():
 
     mine = [r for r in data["per_employee"] if r["employee_id"] == emp_focus]
     assert len(mine) == 2
+    assert {r["employee_id"] for r in data["per_employee"]} == {emp_focus}
     by_week = {r["week_start"]: r for r in mine}
 
     # Expected scores computed with the same pure scorer the endpoint uses.
@@ -147,13 +162,16 @@ def test_focus_trends_math():
         assert team_row["employee_count"] == len(emp_avgs)
 
 
-def test_strain_trends_math():
+def test_strain_trends_math(monkeypatch):
     db = SessionLocal()
     _, emp_strain = _seed(db)
     db.close()
 
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "strain", "weeks": 1})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "strain", "weeks": 1},
+        headers=_employee_headers(monkeypatch, emp_strain),
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["metric"] == "strain"
@@ -164,6 +182,7 @@ def test_strain_trends_math():
     mine = [r for r in data["per_employee"]
             if r["employee_id"] == emp_strain and r["week_start"] == week0_start]
     assert len(mine) == 1
+    assert {r["employee_id"] for r in data["per_employee"]} == {emp_strain}
     row = mine[0]
 
     scores = [80, 85, 50, 60, 20]
@@ -185,7 +204,10 @@ def test_strain_trends_math():
         )
 
 
-def test_trends_rejects_bad_metric():
+def test_trends_rejects_bad_metric(monkeypatch):
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "bogus", "weeks": 2})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "bogus", "weeks": 2},
+        headers=_employee_headers(monkeypatch, "analytics-invalid-metric"),
+    )
     assert resp.status_code == 422

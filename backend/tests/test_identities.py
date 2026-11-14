@@ -17,10 +17,12 @@ from app import edge
 from app.database import SessionLocal, engine
 from app.main import app
 from app.models import FaceRecord, PersonIdentity
+from camera_test_utils import grant_camera_consent
 
 client = TestClient(app)
 
 _FAKE_JPEG = b"\xff\xd8\xff fake-jpeg-bytes"
+_ENROLL_CAMERA = "CAM_TEST_ENROLL"
 
 
 def _name(prefix="Ident"):
@@ -32,15 +34,19 @@ def _cam(prefix="CAM_ID"):
 
 
 def _post_event(payload):
+    name = payload.get("person_name")
+    if isinstance(name, str) and name.strip().casefold() != "unknown":
+        grant_camera_consent(name, payload["camera_id"])
     resp = client.post("/event", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 def _enroll_upload(name):
+    grant_camera_consent(name, _ENROLL_CAMERA)
     resp = client.post(
         "/faces/enroll",
-        data={"name": name},
+        data={"name": name, "camera_id": _ENROLL_CAMERA},
         files={"photo": ("face.jpg", _FAKE_JPEG, "image/jpeg")},
     )
     assert resp.status_code == 200, resp.text
@@ -77,7 +83,10 @@ def test_enroll_via_upload_creates_registry_row():
     assert body["gallery_version"] >= 1
 
     assert any(f["name"] == name for f in client.get("/faces").json())
-    assert any(g["name"] == name for g in client.get("/faces/gallery").json())
+    # No embedding was available for the fake JPEG, so it cannot enter any
+    # camera's identification gallery.
+    assert not any(g["name"] == name for g in client.get(
+        "/faces/gallery", params={"camera_id": _ENROLL_CAMERA}).json())
 
     rows = _identity_named(name)
     assert len(rows) == 1
@@ -91,12 +100,14 @@ def test_enroll_via_upload_creates_registry_row():
 def test_enroll_via_snapshot_path():
     """JSON enroll from a review-queue snapshot works, prefixed or bare."""
     name = _name("Snap")
+    grant_camera_consent(name, _ENROLL_CAMERA)
     filename = f"snap_{uuid.uuid4().hex[:8]}.jpg"
     path = _write_snapshot(filename)
     try:
         resp = client.post(
             "/faces/enroll",
-            json={"name": name, "snapshot_path": f"snapshots/{filename}"},
+            json={"name": name, "snapshot_path": f"snapshots/{filename}",
+                  "camera_id": _ENROLL_CAMERA},
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["name"] == name
@@ -104,8 +115,10 @@ def test_enroll_via_snapshot_path():
         assert any(f["name"] == name for f in client.get("/faces").json())
 
         name2 = _name("Snap")
+        grant_camera_consent(name2, _ENROLL_CAMERA)
         resp = client.post(
-            "/faces/enroll", json={"name": name2, "snapshot_path": filename}
+            "/faces/enroll", json={"name": name2, "snapshot_path": filename,
+                                    "camera_id": _ENROLL_CAMERA}
         )
         assert resp.status_code == 200, resp.text
         assert len(_identity_named(name2)) == 1
@@ -116,9 +129,11 @@ def test_enroll_via_snapshot_path():
 def test_enroll_via_snapshot_path_rejects_bad_input():
     """Missing snapshot is 404, missing name or path is 422."""
     name = _name("SnapBad")
+    grant_camera_consent(name, _ENROLL_CAMERA)
     resp = client.post(
         "/faces/enroll",
-        json={"name": name, "snapshot_path": "snapshots/no_such_file.jpg"},
+        json={"name": name, "snapshot_path": "snapshots/no_such_file.jpg",
+              "camera_id": _ENROLL_CAMERA},
     )
     assert resp.status_code == 404
 
@@ -130,7 +145,8 @@ def test_enroll_via_snapshot_path_rejects_bad_input():
     assert resp.status_code == 422
     resp = client.post(
         "/faces/enroll",
-        json={"name": name, "snapshot_path": "../secret.jpg"},
+        json={"name": name, "snapshot_path": "../secret.jpg",
+              "camera_id": _ENROLL_CAMERA},
     )
     assert resp.status_code == 400
 
@@ -162,7 +178,8 @@ def test_delete_removes_registry_and_gallery():
 
     assert _identity_named(name) == []
     assert not any(f["name"] == name for f in client.get("/faces").json())
-    assert not any(g["name"] == name for g in client.get("/faces/gallery").json())
+    assert not any(g["name"] == name for g in client.get(
+        "/faces/gallery", params={"camera_id": _ENROLL_CAMERA}).json())
 
     db = SessionLocal()
     try:
@@ -287,8 +304,8 @@ def test_sighting_of_vision_only_person_creates_registry_row():
 # ---------------------------------------------------------------- unknowns
 
 
-def test_unknowns_returns_snapshot_links():
-    """Unknown sightings with snapshots are listed, most recent first."""
+def test_unconsented_unknown_snapshots_are_not_persisted_or_exposed():
+    """Unconsented/unknown faces never retain a snapshot reference."""
     cam = _cam("CAM_REV")
     files = []
     try:
@@ -306,7 +323,8 @@ def test_unknowns_returns_snapshot_links():
                     "snapshot_path": f"snapshots/{filename}",
                 }
             )
-        # Unknown with no snapshot: excluded. Known person: excluded.
+        # Unknown with no snapshot: excluded. A consented known person can
+        # still have a snapshot pointer, but is not in the unknown queue.
         _post_event(
             {
                 "camera_id": cam,
@@ -334,29 +352,19 @@ def test_unknowns_returns_snapshot_links():
         resp = client.get(f"/unknowns?camera_id={cam}&limit=50")
         assert resp.status_code == 200, resp.text
         entries = resp.json()
-        tracks = [e["track_id"] for e in entries]
-        assert "rev-1" in tracks and "rev-2" in tracks
-        assert "rev-nosnap" not in tracks
-        assert "rev-known" not in tracks
-        # Most recent first: rev-2 was posted after rev-1.
-        assert tracks.index("rev-2") < tracks.index("rev-1")
-        for e in entries:
-            assert e["snapshot_url"].startswith("/snapshots/")
-            assert e["snapshot_path"].startswith("snapshots/")
-            assert e["camera_id"] == cam
-            assert e["timestamp"]
-            assert e["event_id"]
-        # The snapshot link actually serves the file.
-        first = entries[0]
-        shot = client.get(first["snapshot_url"])
-        assert shot.status_code == 200
+        assert entries == []
+        events = client.get(f"/events?camera_id={cam}&limit=50").json()
+        by_track = {event["track_id"]: event for event in events}
+        assert by_track["rev-1"]["snapshot_path"] is None
+        assert by_track["rev-2"]["snapshot_path"] is None
+        assert by_track["rev-1"]["person_name"] is None
     finally:
         for p in files:
             p.unlink(missing_ok=True)
 
 
-def test_unknowns_deduplicates_by_track():
-    """Repeat sightings of one track collapse to the most recent entry."""
+def test_unknown_snapshots_are_not_added_to_review_queue():
+    """Unknown track IDs do not make face snapshots persistable."""
     cam = _cam("CAM_DUP")
     files = []
     try:
@@ -374,21 +382,20 @@ def test_unknowns_deduplicates_by_track():
                     "snapshot_path": f"snapshots/{filename}",
                 }
             )
-        entries = [
-            e
-            for e in client.get(f"/unknowns?camera_id={cam}&limit=50").json()
-            if e["track_id"] == "dup-track"
-        ]
-        assert len(entries) == 1
-        # Most recent sighting wins, so the second snapshot is linked.
-        assert entries[0]["snapshot_path"].endswith(files[1].name)
+        events = client.get(f"/events?camera_id={cam}&limit=50").json()
+        assert len([event for event in events if event["track_id"] == "dup-track"]) == 2
+        assert all(event["snapshot_path"] is None for event in events)
+        assert not any(
+            entry["track_id"] == "dup-track"
+            for entry in client.get(f"/unknowns?camera_id={cam}&limit=50").json()
+        )
     finally:
         for p in files:
             p.unlink(missing_ok=True)
 
 
-def test_unknowns_accepts_missing_person_name():
-    """An event with no person_name at all counts as unknown."""
+def test_missing_name_does_not_persist_snapshot_for_unknown_person():
+    """A nameless event is anonymous and does not retain a face snapshot."""
     cam = _cam("CAM_NONAME")
     filename = f"noname_{uuid.uuid4().hex[:6]}.jpg"
     path = _write_snapshot(filename)
@@ -403,8 +410,11 @@ def test_unknowns_accepts_missing_person_name():
                 "snapshot_path": f"snapshots/{filename}",
             }
         )
-        entries = client.get(f"/unknowns?camera_id={cam}&limit=50").json()
-        assert any(e["track_id"] == "noname-1" for e in entries)
+        event = client.get(f"/events?camera_id={cam}&limit=1").json()[0]
+        assert event["track_id"] == "noname-1"
+        assert event["person_name"] is None
+        assert event["snapshot_path"] is None
+        assert not client.get(f"/unknowns?camera_id={cam}&limit=50").json()
     finally:
         path.unlink(missing_ok=True)
 

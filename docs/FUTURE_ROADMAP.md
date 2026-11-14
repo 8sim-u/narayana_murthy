@@ -25,26 +25,20 @@ What is still to do:
   work, which as break).
 - Attendance automation from first-seen and last-seen per day.
 
-### 2. Heart rate app: monitors the body
-Status: Partial. BLE smartwatch heart rate scaffolding exists
-(`agent/wearable_ble.py`, HR service 0x180D), strain score exists, and the ML
-stress module exists as a stub. None of it has been proven against a real
-watch on a real person yet.
+### 2. Private wearable wellness: optional self-coaching
+Status: Software path implemented; hardware/live validation intentionally not
+performed. BLE heart-rate and short-window RMSSD may be sent only to the
+employee's private dashboard after separate local and dashboard consent. These
+signals are excluded from activity strain scores and manager-visible alerts.
+The feature is not a medical measure and does not diagnose burnout. The private
+view includes date-only daily summaries, trend hints, false-positive feedback,
+and an optional guided breathing pause. See `docs/WELLNESS_PRIVACY.md` for the
+evidence and limits.
 What is still to do:
-- Pair a real smartwatch and prove continuous heart rate reaches the backend.
-- Add heart rate variability (HRV), specifically RMSSD, the metric consumer
-  wearables report. Research: a gradual decline in resting or overnight HRV
-  of 10 percent or more over 2 to 4 weeks is the early signal of building
-  burnout, while a single low reading means little.
-- Fuse HRV with work strain into one stress score, and trigger break
-  reminders when strain stays high. This is the original "if having too much
-  tension it will trigger breaks" goal.
-- HRV biofeedback coaching, not just alerts: guided paced breathing sessions.
-  Research: a 4-week mobile HRV biofeedback program during work hours cut
-  burnout scores with effect sizes d = 0.63 to 0.69, more than double the
-  improvement from passive tracking alone.
-- Sleep and recovery tracking (overnight HRV and resting heart rate) as a
-  morning readiness input.
+- Validate supported wearable/OS combinations only with explicit employee
+  consent and a privacy review; do not add health-derived performance scoring.
+- Evaluate HRV trend rules as personal reflection prompts, not diagnoses or
+  manager decisions; passive monitoring is not equivalent to active biofeedback.
 
 ### 3. Small executable: the lightweight checker
 Status: Partial. `agent/work_monitor.py` is stdlib-only and already runs on
@@ -88,8 +82,10 @@ These come from outside sources. They are options, not commitments.
   the privacy-respecting direction for this product.
 - AI predictive analytics: detect productivity slumps and bottlenecks before
   they happen, from historical patterns.
-- Burnout early warning: combine the HRV trend with engagement drops (a
-  high performer going quiet) and alert a manager to check in.
+- Issue 19 candidate: an optional, roster-scoped supportive check-in can use a
+  declining HRV trend plus reduced recorded active time. Active time is an
+  imperfect work-pattern proxy; this does not identify high performers, measure
+  engagement, or diagnose burnout.
 - Self-coaching dashboards: each employee sees their own data, which builds
   trust and removes the "big brother" feeling.
 - Real-time feedback loops: instant, data-driven feedback instead of a

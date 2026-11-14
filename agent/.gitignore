@@ -2,3 +2,5 @@ spool/
 .env
 __pycache__/
 *.pyc
+consent.json
+wellness-consent.json

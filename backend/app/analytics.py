@@ -36,8 +36,8 @@ metric=strain
 """
 
 import logging
-from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -47,6 +47,7 @@ from sqlalchemy.orm import Session
 from app.activity import strain_level
 from app.activity_models import ActivityLog
 from app.database import get_db
+from app.employee_auth import require_employee
 from app.focus import Segment, compute_focus_score
 
 logger = logging.getLogger("wamss.api.analytics")
@@ -110,6 +111,13 @@ class StrainTrendsOut(BaseModel):
 
 # ---------------------------------------------------------------- helpers
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize stored timestamps; naive database values are interpreted as UTC."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _week_windows(weeks: int, today: date) -> List[Dict[str, date]]:
     """
     Return [ {"week_start": date, "start": datetime, "end": datetime}, ... ]
@@ -123,15 +131,15 @@ def _week_windows(weeks: int, today: date) -> List[Dict[str, date]]:
         windows.append(
             {
                 "week_start": week_start,
-                "start": datetime(week_start.year, week_start.month, week_start.day),
-                "end": datetime(week_end.year, week_end.month, week_end.day)
+                "start": datetime(week_start.year, week_start.month, week_start.day, tzinfo=timezone.utc),
+                "end": datetime(week_end.year, week_end.month, week_end.day, tzinfo=timezone.utc)
                 + timedelta(days=1),
             }
         )
     return windows
 
 
-def _rows_in_window(db: Session, start: datetime, end: datetime) -> List[ActivityLog]:
+def _rows_in_window(db: Session, start: datetime, end: datetime, employee_id: str) -> List[ActivityLog]:
     """All activity-type rows in [start, end), ordered for segment grouping."""
     return (
         db.query(ActivityLog)
@@ -139,6 +147,7 @@ def _rows_in_window(db: Session, start: datetime, end: datetime) -> List[Activit
             ActivityLog.event_type == "activity",
             ActivityLog.start_time >= start,
             ActivityLog.start_time < end,
+            ActivityLog.employee_id == employee_id,
         )
         .order_by(ActivityLog.employee_id, ActivityLog.start_time)
         .all()
@@ -158,6 +167,7 @@ def get_trends(
     metric: str = Query("focus", description="Trend metric: 'focus' or 'strain'"),
     weeks: int = Query(4, ge=1, le=MAX_WEEKS, description="Number of trailing 7-day weeks"),
     db: Session = Depends(get_db),
+    employee_id: str = Depends(require_employee),
 ):
     """
     Weekly aggregates per employee plus team-level rollups.
@@ -172,13 +182,13 @@ def get_trends(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="metric must be 'focus' or 'strain'",
         )
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     windows = _week_windows(weeks, today)
     earliest = windows[0]["start"]
     latest = windows[-1]["end"]
 
     try:
-        rows = _rows_in_window(db, earliest, latest)
+        rows = _rows_in_window(db, earliest, latest, employee_id)
     except SQLAlchemyError as exc:
         logger.error("failed to query activity for trends: %s", type(exc).__name__)
         raise HTTPException(
@@ -189,26 +199,26 @@ def get_trends(
     per_employee: List[BaseModel] = []
     team: List[BaseModel] = []
 
+    utc_rows = [
+        (row, _as_utc(row.start_time), _as_utc(row.end_time))
+        for row in rows
+    ]
+
     for window in windows:
         week_start: date = window["week_start"]
-        in_week = [
-            r
-            for r in rows
-            if window["start"] <= (r.start_time.replace(tzinfo=None) if r.start_time.tzinfo else r.start_time)
-            < window["end"]
-        ]
-        by_employee: Dict[str, List[ActivityLog]] = {}
-        for r in in_week:
-            by_employee.setdefault(r.employee_id, []).append(r)
+        by_employee: Dict[str, List[Tuple[ActivityLog, datetime, datetime]]] = {}
+        for row, start_utc, end_utc in utc_rows:
+            if window["start"] <= start_utc < window["end"]:
+                by_employee.setdefault(row.employee_id, []).append((row, start_utc, end_utc))
 
         if metric == "focus":
             weekly_means: List[float] = []
             for employee_id, erows in sorted(by_employee.items()):
                 by_day: Dict[date, List[Segment]] = {}
-                for r in erows:
-                    day = r.start_time.date()
+                for r, start_utc, end_utc in erows:
+                    day = start_utc.date()
                     by_day.setdefault(day, []).append(
-                        Segment(r.start_time, r.end_time, r.app_name, r.is_idle)
+                        Segment(start_utc, end_utc, r.app_name, r.is_idle)
                     )
                 daily_scores = [
                     compute_focus_score(segs)["score"]
@@ -239,9 +249,10 @@ def get_trends(
             weekly_means = []
             totals = {"green": 0, "amber": 0, "red": 0, "unknown": 0}
             for employee_id, erows in sorted(by_employee.items()):
-                scored = [r.strain_score for r in erows if r.strain_score is not None]
+                employee_rows = [r for r, _, _ in erows]
+                scored = [r.strain_score for r in employee_rows if r.strain_score is not None]
                 levels = {"green": 0, "amber": 0, "red": 0, "unknown": 0}
-                for r in erows:
+                for r in employee_rows:
                     levels[strain_level(r.strain_score)] += 1
                 for key in totals:
                     totals[key] += levels[key]
@@ -257,7 +268,7 @@ def get_trends(
                         amber=levels["amber"],
                         red=levels["red"],
                         unknown=levels["unknown"],
-                        records=len(erows),
+                        records=len(employee_rows),
                     )
                 )
             team.append(

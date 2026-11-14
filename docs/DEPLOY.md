@@ -85,12 +85,12 @@ value, and run without `--profile postgres`.
 host with plain `python3` while the stack runs in Docker:
 
 ```bash
-# Seed 5 employees x 7 days against the composed backend
-python3 shared/simulate.py --api-url http://localhost:8000
-
-# If WAMSS_API_KEY is set in .env, pass the same key:
-WAMSS_API_KEY=<your-key> python3 shared/simulate.py --api-url http://localhost:8000
-# or: python3 shared/simulate.py --api-url http://localhost:8000 --api-key <your-key>
+# Trusted service option: set this flag in the backend .env, then pass the same
+# validated deployment key and flag to the simulator process.
+WAMSS_API_KEY=<your-key> WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS=1 \\
+  python3 shared/simulate.py --api-url http://localhost:8000
+# Alternatively, configure WAMSS_SIMULATOR_EMPLOYEE_TOKENS with a matching
+# token for each E001, E002, ... ID, plus the corresponding server-side hashes.
 ```
 
 Then refresh the dashboard at http://localhost:8080 to see the seeded events,

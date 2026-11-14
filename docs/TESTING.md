@@ -6,9 +6,52 @@ results that still need a real person, a real watch, or a second machine are
 in the "Not yet proven live" section at the end, and each one has a GitHub
 issue so someone can claim it.
 
-Last updated: 2026-11-13. GitHub main: `fb40340`.
+Last updated: 2026-11-14. The results below are the previously recorded
+2026-11-13 baseline (`fb40340`), before the current camera-consent changes.
+The new camera-consent regression tests were added but were not run; no
+hardware or live checks were run for those changes.
 
-## Automated suites (run on the Muse VM)
+## Continuous integration
+
+GitHub Actions runs on every pull request and on pushes to `main`. The checks
+cover the vision tests, backend tests, frontend build (`npm run build`), an
+em-dash scan, and a secrets scan. The aggregate `ci-required` status fails if
+any of those jobs fails. To make GitHub block merges on failure, the repository
+ruleset or branch protection must require the `ci-required` status check; that
+setting is managed in repository settings, not by this workflow file. CI uses
+read-only repository permissions and does not replace the live, consent, or
+privacy proofs documented below.
+
+### Require the aggregate check before merging
+
+Configure one of the following in the repository settings for `main`; editing
+the workflow alone does not enable merge blocking:
+
+1. **Branch protection:** Open **Settings > Branches**, add or edit a branch
+   protection rule with branch name pattern `main`, enable **Require status
+   checks to pass before merging**, then search for and select the Actions
+   check for the `ci-required` job. Save or create the rule. See GitHub's
+   [branch protection instructions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule).
+2. **Repository ruleset:** Open **Settings > Rules > Rulesets**, create or edit
+   an active branch ruleset targeting `main`, enable **Require status checks
+   before merging**, and add the `ci-required` check under **Additional
+   settings**. Save the ruleset. See GitHub's
+   [repository ruleset instructions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
+
+Require the aggregate `ci-required` job, rather than selecting only individual
+jobs, so every dependency in the workflow gates the merge. If the check is not
+available in GitHub's picker, let the workflow run on `main` and refresh the
+picker. Review any configured bypass permissions as well: a permitted bypass
+can exempt a merge from the check. These steps document the required setup;
+they do not change or verify the repository's current settings.
+
+## Automated suites (historical baseline, before camera-consent changes)
+
+The results in this section are not verification of the current working tree.
+The consent-specific regression coverage now checks fail-closed camera mode,
+per-camera consent and withdrawal, aggregate-only behavior, enrollment and
+gallery filtering, and live-position name scrubbing. Those tests remain
+unexecuted in this patch.
 
 ### Vision suite: 73 passed, 0 failed
 Run with pytest in `~/workspace/.venvs/wamss-vision-test` (pytest 9.2.0,
@@ -23,11 +66,9 @@ numpy 2.5.4, requests). Covers:
   confidence; a non-matching face stays unknown; a name survives re-checks
   that find no face; a gallery reload names a newly enrolled person on a
   fresh track without restart.
-- Privacy: 16 tests, including 2 new tests proving the identity paths are
-  disabled in privacy mode (gallery refresher returns None, no HTTP fetch).
-- Gallery sync: 13 tests (version-change sync, same-version skip, poll
-  interval, fetch failures keep the local gallery, stale sidecars removed on
-  dashboard delete, all disabled states).
+- Privacy and legacy gallery-sync counts below reflect the old implementation;
+  the unscoped gallery refresher has since been disabled and its tests replaced
+  with a no-op regression. Current consent-gallery coverage is unexecuted.
 - Pre-existing privacy and flag tests: 15.
 
 ### Backend suite: 133 passed, 0 failed
@@ -104,11 +145,16 @@ and will be added when the tunnel is back.
 python -m pytest vision/tests/ -q
 
 # Backend (from inside backend/)
-cd backend && python -m pytest -q
+(cd backend && python -m pytest -q)
+
+# Audit chain (from inside backend/, using the configured DATABASE_URL)
+(cd backend && python scripts/verify_audit_chain.py)
 
 # Frontend (from inside frontend/)
-cd frontend && npm run build
+(cd frontend && npm run build)
 ```
+
+See [AUDIT_LOGS.md](AUDIT_LOGS.md) for verification output and migration details.
 
 ## Rules for contributors
 

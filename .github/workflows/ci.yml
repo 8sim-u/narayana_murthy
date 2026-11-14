@@ -4,9 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
+  vision-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install vision test dependencies
+        run: python -m pip install pytest numpy requests
+      - name: Run vision tests
+        run: python -m pytest vision/tests/ -q
+
   backend-tests:
     runs-on: ubuntu-latest
     steps:
@@ -15,7 +29,103 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install backend dependencies
-        run: pip install -r backend/requirements.txt
+        run: python -m pip install -r backend/requirements.txt
       - name: Run backend tests
         run: python -m pytest -v
         working-directory: backend
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+  em-dash-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject em dashes in added lines
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not base or set(base) == {"0"}:
+              print("Unable to determine the base commit for this scan.", file=sys.stderr)
+              sys.exit(1)
+          revision = f"{base}...{head}" if os.environ["EVENT_NAME"] == "pull_request" else f"{base}..{head}"
+          diff = subprocess.run(
+              ["git", "diff", "--unified=0", revision, "--"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          offenders = []
+          current_file = ""
+          for line in diff:
+              if line.startswith("+++ b/"):
+                  current_file = line[6:]
+              elif line.startswith("+") and not line.startswith("+++") and "\u2014" in line:
+                  offenders.append(f"{current_file}: {line[1:]}")
+          if offenders:
+              print("Em dash found in added lines:", file=sys.stderr)
+              print("\n".join(offenders), file=sys.stderr)
+              sys.exit(1)
+          PY
+
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan repository for secrets
+        run: >-
+          docker run --rm
+          -v "$PWD:/repo"
+          ghcr.io/gitleaks/gitleaks:v8.24.2
+          detect --source=/repo --no-git --exit-code=1
+
+  ci-required:
+    if: always()
+    needs:
+      - vision-tests
+      - backend-tests
+      - frontend-build
+      - em-dash-scan
+      - secrets-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job to pass
+        env:
+          VISION_RESULT: ${{ needs.vision-tests.result }}
+          BACKEND_RESULT: ${{ needs.backend-tests.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-build.result }}
+          EMDASH_RESULT: ${{ needs.em-dash-scan.result }}
+          SECRETS_RESULT: ${{ needs.secrets-scan.result }}
+        run: |
+          if [[ "$VISION_RESULT" != "success" || \
+                "$BACKEND_RESULT" != "success" || \
+                "$FRONTEND_RESULT" != "success" || \
+                "$EMDASH_RESULT" != "success" || \
+                "$SECRETS_RESULT" != "success" ]]; then
+            echo "One or more required CI jobs did not pass." >&2
+            exit 1
+          fi

@@ -2,6 +2,8 @@
 dedicated test FastAPI app, per the agent-4 contract)."""
 
 import csv
+import hashlib
+import json
 import io
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,6 +17,15 @@ from app.exports import router as exports_router
 from app.models import DetectionEvent
 
 A4 = "a4x"  # unique prefix so these tests do not collide with other suites
+
+
+def _employee_headers(employee_id: str, monkeypatch):
+    token = f"exports-test-token:{employee_id}"
+    monkeypatch.setenv(
+        "WAMSS_EMPLOYEE_TOKEN_HASHES",
+        json.dumps({employee_id: hashlib.sha256(token.encode()).hexdigest()}),
+    )
+    return {"X-Employee-Token": token}
 
 
 def _override_get_db():
@@ -134,7 +145,7 @@ def test_events_csv_filter_respected():
 
 # ---------------------------------------------------------------- activity.csv
 
-def test_activity_csv_shape_and_filter():
+def test_activity_csv_shape_and_filter(monkeypatch):
     db = SessionLocal()
     _cleanup(db)
     day = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
@@ -143,7 +154,8 @@ def test_activity_csv_shape_and_filter():
     db.close()
 
     client = _make_client()
-    resp = client.get("/exports/activity.csv")
+    headers = _employee_headers(f"{A4}e1", monkeypatch)
+    resp = client.get("/exports/activity.csv", headers=headers)
     assert resp.status_code == 200
     assert "text/csv" in resp.headers["content-type"]
     assert "activity.csv" in resp.headers["content-disposition"]
@@ -152,19 +164,25 @@ def test_activity_csv_shape_and_filter():
     assert "strain_level" in fieldnames
     assert "employee_id" in fieldnames
     mine = [r for r in rows if r["employee_id"].startswith(A4)]
-    assert len(mine) == 3
+    assert len(mine) == 2  # No other employee rows are returned.
 
-    resp = client.get("/exports/activity.csv", params={"employee_id": f"{A4}e1"})
+    resp = client.get(
+        "/exports/activity.csv", params={"employee_id": f"{A4}e1"}, headers=headers
+    )
     _, rows = _parse_csv(resp.text)
     mine = [r for r in rows if r["employee_id"].startswith(A4)]
     assert len(mine) == 2
     assert all(r["employee_id"] == f"{A4}e1" for r in mine)
     assert all(r["strain_level"] == "red" for r in mine)  # seeded strain 85
+    forbidden = client.get(
+        "/exports/activity.csv", params={"employee_id": f"{A4}e2"}, headers=headers
+    )
+    assert forbidden.status_code == 403
 
 
 # ---------------------------------------------------------------- focus.csv
 
-def test_focus_csv_scores_seeded_day():
+def test_focus_csv_scores_seeded_day(monkeypatch):
     db = SessionLocal()
     _cleanup(db)
     today = datetime.now(timezone.utc)
@@ -199,6 +217,7 @@ def test_focus_csv_scores_seeded_day():
     resp = client.get(
         "/exports/focus.csv",
         params={"employee_id": f"{A4}e3", "start_date": today_str, "end_date": today_str},
+        headers=_employee_headers(f"{A4}e3", monkeypatch),
     )
     assert resp.status_code == 200
     assert f"focus-{A4}e3.csv" in resp.headers["content-disposition"]
@@ -212,7 +231,7 @@ def test_focus_csv_scores_seeded_day():
     assert int(rows[0]["focused_blocks"]) == 4
 
 
-def test_focus_csv_rejects_reversed_range():
+def test_focus_csv_rejects_reversed_range(monkeypatch):
     client = _make_client()
     resp = client.get(
         "/exports/focus.csv",
@@ -221,5 +240,6 @@ def test_focus_csv_rejects_reversed_range():
             "start_date": "2026-10-30",
             "end_date": "2026-10-20",
         },
+        headers=_employee_headers(f"{A4}e3", monkeypatch),
     )
     assert resp.status_code == 422

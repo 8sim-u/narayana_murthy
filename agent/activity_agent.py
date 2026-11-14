@@ -17,6 +17,7 @@ see agent/.env.example.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import platform
@@ -24,8 +25,10 @@ import re
 import socket
 import threading
 import time
+import urllib.parse
 import uuid
-from collections import deque
+from contextlib import contextmanager
+from collections import Counter, deque
 from datetime import datetime, timezone
 from typing import Callable, Deque, Dict, Optional, Tuple
 
@@ -49,11 +52,29 @@ except ImportError:  # pragma: no cover - defensive
         return "log"
 
 try:
-    from consent import ensure_consent
+    from consent import (configured_employee_id, current_os_user, ensure_consent, is_consented,
+                         ensure_wellness_consent, is_wellness_consented)
 except ImportError:  # pragma: no cover - defensive
-    def ensure_consent() -> bool:  # type: ignore
-        logger.warning("consent module unavailable; skipping consent gate")
-        return True
+    def configured_employee_id(os_user: Optional[str] = None) -> str:  # type: ignore
+        return os.environ.get("WAMSS_EMPLOYEE_ID", os.environ.get("USER", "unknown"))
+
+    def current_os_user() -> Optional[str]:  # type: ignore
+        return None
+
+    def ensure_consent(*, employee_id=None, os_user=None) -> bool:  # type: ignore
+        logger.error("consent module unavailable; refusing to collect")
+        return False
+
+    def is_consented(path=None, *, employee_id=None, os_user=None) -> bool:  # type: ignore
+        logger.error("consent module unavailable; refusing to sync")
+        return False
+
+    def ensure_wellness_consent() -> bool:  # type: ignore
+        logger.error("wellness consent module unavailable; wearable stays off")
+        return False
+
+    def is_wellness_consented() -> bool:  # type: ignore
+        return False
 
 try:
     from wearable_ble import HeartRateStream
@@ -82,16 +103,23 @@ def _getenv_float(name: str, default: float) -> float:
 
 SERVER_URL = os.environ.get("WAMSS_AGENT_SERVER_URL", "http://localhost:8000").rstrip("/")
 
-# Shared secret for the backend API key auth (docs/AUTH.md). Sent as the
-# X-API-Key header when set; when empty, auth stays disabled on the backend.
+# Optional deployment key for separately trusted clients, plus this employee's
+# personal token. Windows provisioning clears the global key; this token binds
+# activity records to EMPLOYEE_ID and is never a manager credential.
 API_KEY = os.environ.get("WAMSS_API_KEY", "")
+EMPLOYEE_TOKEN = os.environ.get("WAMSS_EMPLOYEE_TOKEN", "")
 
 
-def _auth_headers():
-    """Headers for backend POSTs; includes X-API-Key only when configured."""
-    return {"X-API-Key": API_KEY} if API_KEY else None
+def _auth_headers(employee_token: Optional[str] = EMPLOYEE_TOKEN):
+    """Return configured deployment and employee headers for agent POSTs."""
+    headers = {}
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
+    if employee_token:
+        headers["X-Employee-Token"] = employee_token
+    return headers or None
 MACHINE_ID = os.environ.get("WAMSS_MACHINE_ID", socket.gethostname())
-EMPLOYEE_ID = os.environ.get("WAMSS_EMPLOYEE_ID", os.environ.get("USER", "unknown"))
+EMPLOYEE_ID = configured_employee_id()
 
 # ------------------------------------------------------------------
 # Agent 5 (multi-office, Round 3): office identity.
@@ -104,19 +132,42 @@ EMPLOYEE_ID = os.environ.get("WAMSS_EMPLOYEE_ID", os.environ.get("USER", "unknow
 OFFICE_ID = os.environ.get("WAMSS_OFFICE_ID", "hq")
 LOG_INTERVAL = _getenv_float("WAMSS_LOG_INTERVAL", 60.0)          # seconds per activity segment
 SYNC_INTERVAL = _getenv_float("WAMSS_SYNC_INTERVAL", 300.0)       # seconds between upload attempts
+SYNC_ENABLED = os.environ.get("WAMSS_SYNC_ENABLED", "1") != "0"
 IDLE_AFTER_SEC = _getenv_float("WAMSS_IDLE_AFTER_SEC", 180.0)     # no input -> idle segment
-SPOOL_DIR = os.environ.get("WAMSS_SPOOL_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "spool"))
+
+
+def spool_dir_for_identity(
+    os_user: Optional[str] = None,
+    employee_id: Optional[str] = None,
+) -> Optional[str]:
+    """Return a stable, identity-isolated spool path, or None if identity is unknown."""
+    user = current_os_user() if os_user is None else os_user
+    employee = configured_employee_id(user) if employee_id is None else employee_id
+    if not user or not employee:
+        return None
+    configured_root = os.environ.get(
+        "WAMSS_SPOOL_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "spool")
+    )
+    root = os.path.expanduser(configured_root)
+    if not os.path.isabs(root):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), root)
+    scope = hashlib.sha256(f"{employee}\0{user}".encode("utf-8")).hexdigest()[:24]
+    return os.path.join(root, scope)
+
+
+SPOOL_DIR = spool_dir_for_identity(employee_id=EMPLOYEE_ID) or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "spool", "unbound"
+)
 MAX_BATCH = _getenv_int("WAMSS_MAX_BATCH", 500)                   # records per POST
 MAX_BACKOFF_SEC = _getenv_float("WAMSS_MAX_BACKOFF_SEC", 3600.0)
 SCREENSHOTS_ENABLED = os.environ.get("WAMSS_SCREENSHOTS", "0") == "1"  # reserved; must stay 0 unless explicitly enabled
+WELLNESS_BREAK_PROMPTS = os.environ.get("WAMSS_WELLNESS_BREAK_PROMPTS", "0") == "1"
 
 # Privacy exclusion list: personal apps/windows that are never logged,
 # not even to the local spool. Case-insensitive process/app names.
 EXCLUDED_APPS = {a.strip().lower() for a in os.environ.get("WAMSS_EXCLUDED_APPS", "").split(",") if a.strip()}
 EXCLUDED_TITLES_RE = os.environ.get("WAMSS_EXCLUDED_TITLES", "").strip()
 
-# Optional smartwatch heart rate blended into the strain score.
-HR_RESTING_BPM = _getenv_int("WAMSS_STRAIN_HR_RESTING", 90)
 
 # Round 4: opt-in ML/fatigue/fusion strain pipeline. Default 0 keeps the
 # heuristic-only behavior exactly as before.
@@ -294,47 +345,134 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@contextmanager
+def _cross_process_lock(lock_path: str):
+    """Serialize spool operations across the collector and Windows sync service."""
+    lock_parent = os.path.dirname(lock_path) or "."
+    if not os.path.isdir(lock_parent):
+        os.makedirs(lock_parent, exist_ok=True)
+    lock_file = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            while True:
+                lock_file.seek(0)
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
 class Spool:
     """Append-only JSONL spool; records stay local until a sync succeeds."""
 
     def __init__(self, spool_dir: str = SPOOL_DIR) -> None:
         self.dir = spool_dir
-        os.makedirs(self.dir, exist_ok=True)
+        if not os.path.isdir(self.dir):
+            os.makedirs(self.dir, exist_ok=True)
         self.pending_path = os.path.join(self.dir, "pending.jsonl")
         self.sent_path = os.path.join(self.dir, "sent.jsonl")
+        self.lock_path = os.path.join(self.dir, ".spool.lock")
         self._lock = threading.Lock()
 
     def append(self, record: Dict) -> None:
         line = json.dumps(record, default=str)
-        with self._lock, open(self.pending_path, "a", encoding="utf-8") as f:
+        with self._lock, _cross_process_lock(self.lock_path), open(self.pending_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     def read_batch(self, max_records: int = MAX_BATCH) -> list:
-        with self._lock:
+        with self._lock, _cross_process_lock(self.lock_path):
             if not os.path.exists(self.pending_path):
                 return []
             with open(self.pending_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
         return [json.loads(l) for l in lines[:max_records] if l.strip()]
 
-    def mark_sent(self, count: int) -> None:
-        """Drop the first `count` pending lines; archive them to sent.jsonl."""
-        with self._lock:
+    def mark_sent(self, records_or_count) -> None:
+        """Archive exactly the uploaded records, preserving unrelated pending rows.
+
+        Integer input remains supported for older callers. Syncer passes the
+        posted records so concurrent processes cannot acknowledge a different
+        set of lines after another process has already removed its batch.
+        """
+        with self._lock, _cross_process_lock(self.lock_path):
             if not os.path.exists(self.pending_path):
                 return
             with open(self.pending_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            sent, remaining = lines[:count], lines[count:]
+            if isinstance(records_or_count, int):
+                sent, remaining = lines[:records_or_count], lines[records_or_count:]
+            else:
+                pending_ids = Counter(
+                    str(record["record_id"])
+                    for record in records_or_count
+                    if isinstance(record, dict) and record.get("record_id")
+                )
+                pending_payloads = Counter(
+                    json.dumps(record, sort_keys=True, default=str)
+                    for record in records_or_count
+                    if isinstance(record, dict) and not record.get("record_id")
+                )
+                sent, remaining = [], []
+                for line in lines:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        remaining.append(line)
+                        continue
+                    record_id = str(record.get("record_id")) if isinstance(record, dict) and record.get("record_id") else None
+                    payload_key = json.dumps(record, sort_keys=True, default=str)
+                    if record_id and pending_ids[record_id] > 0:
+                        pending_ids[record_id] -= 1
+                        sent.append(line)
+                    elif not record_id and pending_payloads[payload_key] > 0:
+                        pending_payloads[payload_key] -= 1
+                        sent.append(line)
+                    else:
+                        remaining.append(line)
             with open(self.sent_path, "a", encoding="utf-8") as f:
                 f.writelines(sent)
+                f.flush()
+                os.fsync(f.fileno())
             tmp = self.pending_path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 f.writelines(remaining)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.pending_path)
+            if os.name != "nt":
+                directory_fd = os.open(self.dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
 
     def pending_count(self) -> int:
         try:
-            with open(self.pending_path, "r", encoding="utf-8") as f:
+            with self._lock, _cross_process_lock(self.lock_path), open(self.pending_path, "r", encoding="utf-8") as f:
                 return sum(1 for line in f if line.strip())
         except FileNotFoundError:
             return 0
@@ -342,33 +480,151 @@ class Spool:
 
 # ---------------------------------------------------------------- sync with exponential backoff
 
+class WellnessUploader:
+    """Direct, best-effort live-sample upload; never writes health data to the spool."""
+
+    def __init__(self, server_url: str = SERVER_URL, employee_token: str = EMPLOYEE_TOKEN) -> None:
+        self.server_url = server_url.rstrip("/")
+        self.employee_token = employee_token
+        self.session = requests.Session()
+        self.last_sent_ts = 0.0
+        self._warned_rejected = False
+        self._disabled = False
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
+
+    def upload_live(self, sample: Dict) -> bool:
+        if self._disabled or not is_wellness_consented() or not self.employee_token:
+            return False
+        try:
+            ts = float(sample.get("ts", 0))
+            if ts <= self.last_sent_ts or time.time() - ts > 90:
+                return False
+            headers = dict(_auth_headers() or {})
+            headers["X-Employee-Token"] = self.employee_token
+            payload = {
+                "heart_rate_bpm": int(sample["bpm"]),
+                "rmssd_ms": sample.get("rmssd_ms"),
+                "observed_at": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+            }
+            response = self.session.post(
+                f"{self.server_url}/wellness/live", json=payload, headers=headers, timeout=4,
+            )
+            if response.status_code in (401, 403, 503):
+                if not self._warned_rejected:
+                    logger.warning("wearable sample was not accepted; check personal token and separate dashboard consent")
+                    self._warned_rejected = True
+                self._disabled = True
+                return False
+            response.raise_for_status()
+            self.last_sent_ts = ts
+            return True
+        except Exception as exc:
+            logger.debug("live wellness upload skipped: %s", type(exc).__name__)
+            return False
+
+
+class WellnessBreakPromptPoller:
+    """Poll the employee-only combined prompt and log a suggestion, never completion."""
+
+    def __init__(self, server_url: str = SERVER_URL,
+                 employee_token: str = EMPLOYEE_TOKEN,
+                 notifier: Optional[Callable[[str, str], None]] = None) -> None:
+        self.server_url = server_url.rstrip("/")
+        self.employee_token = employee_token
+        self.notifier = notifier
+        self.session = requests.Session()
+        self.suggested_today = False
+
+    def poll(self) -> bool:
+        if (not WELLNESS_BREAK_PROMPTS or not self.employee_token
+                or not is_wellness_consented()):
+            return False
+        headers = dict(_auth_headers() or {})
+        headers["X-Employee-Token"] = self.employee_token
+        try:
+            response = self.session.get(f"{self.server_url}/wellness/me", headers=headers, timeout=5)
+            response.raise_for_status()
+            wellness = (response.json().get("wellness") or {})
+            breaks = wellness.get("breaks_today") or {}
+            if breaks.get("suggested"):
+                self.suggested_today = True
+            prompt = wellness.get("break_prompt") or {}
+            if (self.suggested_today or not wellness.get("consented")
+                    or not prompt.get("show_prompt")):
+                return False
+            self.suggested_today = True
+            notify_break(
+                "Time for a break",
+                "Consider stepping away for a few minutes. This is a private wellness nudge, not a medical assessment.",
+                notifier=self.notifier,
+            )
+            # This minimal employee-scoped record means the prompt is logged
+            # even if no control is clicked. It is not a completed break.
+            logged = self.session.post(
+                f"{self.server_url}/wellness/breaks",
+                json={"event_type": "suggested"}, headers=headers, timeout=5,
+            )
+            logged.raise_for_status()
+            return True
+        except Exception as exc:
+            logger.debug("private wellness break prompt skipped: %s", type(exc).__name__)
+            return False
+
+
 class Syncer:
-    def __init__(self, spool: Spool, server_url: str = SERVER_URL) -> None:
+    def __init__(
+        self,
+        spool: Spool,
+        server_url: str = SERVER_URL,
+        employee_token: Optional[str] = EMPLOYEE_TOKEN,
+        os_user: Optional[str] = None,
+    ) -> None:
         self.spool = spool
         self.server_url = server_url
+        self.employee_token = employee_token
+        self.os_user = os_user
         self.backoff = 30.0
         self.session = requests.Session()
 
     def sync_once(self) -> bool:
+        if not is_consented(employee_id=EMPLOYEE_ID, os_user=self.os_user):
+            logger.info("activity sync paused: workstation consent is absent")
+            return False
+        parsed = urllib.parse.urlsplit(self.server_url)
+        if parsed.scheme != "https" and not (
+            parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        ):
+            logger.error("activity sync blocked: server URL must use HTTPS (HTTP is allowed only for loopback)")
+            return False
         batch = self.spool.read_batch()
         if not batch:
             self.backoff = 30.0
             return True
+        if not self.employee_token:
+            logger.error(
+                "activity sync blocked: WAMSS_EMPLOYEE_TOKEN is missing; %d records remain spooled",
+                self.spool.pending_count(),
+            )
+            return False
         try:
             resp = self.session.post(
                 f"{self.server_url}/activity",
                 json={"records": batch},
                 timeout=15,
-                headers=_auth_headers(),
+                headers=_auth_headers(self.employee_token),
+                allow_redirects=False,
             )
             resp.raise_for_status()
-            self.spool.mark_sent(len(batch))
+            self.spool.mark_sent(batch)
             self.backoff = 30.0
             logger.info("synced %d activity records", len(batch))
             return True
         except Exception as exc:
-            logger.warning("sync failed (%s); backing off %.0fs, %d records spooled locally",
-                           exc, self.backoff, self.spool.pending_count())
+            logger.warning("sync failed (%s); backing off %.0fs, %d records spooled",
+                           type(exc).__name__, self.backoff, self.spool.pending_count())
             self.backoff = min(self.backoff * 2, MAX_BACKOFF_SEC)
             return False
 
@@ -525,8 +781,9 @@ def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None,
             mouse_intervals=MOUSE_TIMINGS.drain() if MOUSE_TIMINGS else (),
             employee_id=EMPLOYEE_ID,
             session_ended=session_ended,
-            hr_stream=hr_stream,
-            resting_bpm=HR_RESTING_BPM,
+            # Health-derived values are intentionally excluded from the
+            # activity strain score and all manager-visible alerts.
+            hr_stream=None,
         )
         score = enriched.score
         ml_score = enriched.ml_score
@@ -534,12 +791,9 @@ def collect_once(counter: InputCounter, tracker: StrainTracker, hr_stream=None,
         if fatigue_event is not None and spool is not None:
             spool_fatigue_event(spool, fatigue_event, score)
     else:
-        # Blend optional smartwatch heart rate into the strain score:
-        # elevated BPM adds at most 10 points (+1 per 2 BPM over resting).
+        # Activity strain remains work-pattern-only; wearable values are
+        # available exclusively in the employee's separate private view.
         score = strain.score
-        bpm = hr_stream.latest_bpm if (hr_stream is not None and hr_stream.available) else None
-        if bpm is not None and bpm > HR_RESTING_BPM:
-            score = min(100, score + min(10, (bpm - HR_RESTING_BPM) // 2))
         fatigue_event = None
 
     return {
@@ -593,26 +847,46 @@ def run(stop_after: Optional[float] = None,
     """
     Main loop. stop_after (seconds) is for dry runs; None means run forever.
     """
-    if not ensure_consent():
+    if not ensure_consent(employee_id=EMPLOYEE_ID):
         raise SystemExit("WAMSS agent stopped: consent not given.")
 
-    os.makedirs(SPOOL_DIR, exist_ok=True)
-    spool = Spool(SPOOL_DIR)
-    syncer = Syncer(spool)
+    wellness_local_consent = False
+    wellness_features_enabled = (os.environ.get("WAMSS_BLE_ENABLED", "0") == "1"
+                                 or WELLNESS_BREAK_PROMPTS)
+    if wellness_features_enabled and EMPLOYEE_TOKEN:
+        wellness_local_consent = ensure_wellness_consent()
+
+    active_user = current_os_user()
+    spool_dir = spool_dir_for_identity(os_user=active_user, employee_id=EMPLOYEE_ID)
+    if not spool_dir:
+        raise SystemExit("WAMSS agent stopped: active employee/OS identity unavailable.")
+    os.makedirs(spool_dir, exist_ok=True)
+    spool = Spool(spool_dir)
+    syncer = Syncer(spool) if SYNC_ENABLED else None
     counter = InputCounter()
     counter.start()
     tracker = StrainTracker(notifier=notifier)
+    wellness_prompt_poller = (
+        WellnessBreakPromptPoller(notifier=notifier)
+        if WELLNESS_BREAK_PROMPTS and EMPLOYEE_TOKEN and wellness_local_consent else None
+    )
 
     hr_stream = None
-    if HeartRateStream is not None:
+    wellness_uploader = None
+    if (HeartRateStream is not None and os.environ.get("WAMSS_BLE_ENABLED", "0") == "1"
+            and EMPLOYEE_TOKEN and wellness_local_consent):
         try:
+            wellness_uploader = WellnessUploader()
             hr_stream = HeartRateStream().start()
         except Exception as exc:
-            logger.warning("BLE heart-rate stream failed to start: %s", exc)
+            logger.warning("BLE wellness stream failed to start: %s", type(exc).__name__)
             hr_stream = None
+            wellness_uploader = None
+    elif os.environ.get("WAMSS_BLE_ENABLED", "0") == "1":
+        logger.info("BLE stays off: employee token or separate local wellness consent is missing")
 
     logger.info("WAMSS activity agent started: machine=%s employee=%s interval=%ss sync=%ss spool=%s",
-                MACHINE_ID, EMPLOYEE_ID, LOG_INTERVAL, SYNC_INTERVAL, SPOOL_DIR)
+                MACHINE_ID, EMPLOYEE_ID, LOG_INTERVAL, SYNC_INTERVAL, spool_dir)
     if SCREENSHOTS_ENABLED:
         logger.warning("WAMSS_SCREENSHOTS=1 is set; screenshot capture is not implemented and stays off.")
 
@@ -622,6 +896,27 @@ def run(stop_after: Optional[float] = None,
         segment_start = datetime.now(timezone.utc)
         while True:
             time.sleep(LOG_INTERVAL)
+            # Consent can be withdrawn while this per-user process is running.
+            # Stop before another sample is collected or spooled; the Windows
+            # sync service independently checks the same marker before upload.
+            if not is_consented(employee_id=EMPLOYEE_ID):
+                logger.info("workstation consent withdrawn; stopping collection and pausing uploads")
+                break
+            if wellness_uploader is not None and hr_stream is not None:
+                if not is_wellness_consented():
+                    hr_stream.stop()
+                    logger.info("local wellness consent marker removed; BLE stopped and sample memory cleared")
+                    hr_stream = None
+                    wellness_uploader = None
+                else:
+                    sample = hr_stream.latest_sample()
+                    if sample is not None:
+                        wellness_uploader.upload_live(sample)
+                        if wellness_uploader.disabled:
+                            hr_stream.stop()
+                            logger.info("server declined wellness upload; BLE stopped and sample memory cleared")
+                            hr_stream = None
+                            wellness_uploader = None
             record = collect_once(counter, tracker, hr_stream=hr_stream, spool=spool)
             if record is None:
                 segment_start = datetime.now(timezone.utc)
@@ -631,9 +926,11 @@ def run(stop_after: Optional[float] = None,
             spool.append(record)
 
             tracker.maybe_trigger_break(spool)
+            if wellness_prompt_poller is not None:
+                wellness_prompt_poller.poll()
 
             now = time.time()
-            if now - last_sync >= SYNC_INTERVAL:
+            if syncer is not None and now - last_sync >= SYNC_INTERVAL:
                 if syncer.sync_once():
                     last_sync = now
                 else:

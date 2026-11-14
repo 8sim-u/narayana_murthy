@@ -112,8 +112,13 @@ realistic simulated telemetry, then explore the full dashboard:
 
 ```bash
 python3 shared/simulate.py --dry-run   # preview, sends nothing
-python3 shared/simulate.py             # seed 5 employees x 7 workdays
+# Configure per-employee tokens, or enable trusted service ingestion as in docs/AUTH.md.
 ```
+
+Employee-attributed demo writes now require tokens matching each simulated
+employee. For a local trusted seed job, enable
+`WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS=1` on the backend and run the simulator
+with its validated deployment API key; do not put that key in the browser.
 
 Point the dashboard at the same API (`VITE_API_URL` in `frontend/.env`).
 Build a Monday summary from the seeded data with
@@ -141,10 +146,11 @@ Then:
 - Dashboard: http://localhost:8080
 - Backend: http://localhost:8000 (`/health`, `/docs`)
 
-Verify with a seeded demo (uses `WAMSS_API_KEY` from `.env` automatically):
+Verify with a seeded demo (trusted service mode must also be enabled in `.env`):
 
 ```bash
 export WAMSS_API_KEY=$(grep '^WAMSS_API_KEY=' .env | cut -d= -f2)
+export WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS=1
 python3 shared/simulate.py --api-url http://localhost:8000 --employees 5 --days 7
 ```
 
@@ -222,7 +228,7 @@ highest-priority items:
 1. **A database credential was previously committed** in `backend/tests/conftest.py` and still
    exists in git history. It has been removed from the working tree, but **the password must be
    rotated** - removing it from the file does not invalidate it.
-2. **API key auth is implemented** (`X-API-Key` header, `WAMSS_API_KEY`; see `docs/AUTH.md`), but there is no per-user auth or role model. Anyone with the key has full access.
+2. **API key auth is implemented** (`X-API-Key` header, `WAMSS_API_KEY`; see `docs/AUTH.md`). Employee activity reads and history are scoped by per-employee `X-Employee-Token`; activity and security writes also validate submitted employee IDs against that token unless the opt-in trusted service-ingestion mode is enabled. There is still no manager/role model for broader administrative and vision endpoints, so do not expose the deployment key to untrusted callers or browser code.
 3. **Rule 2 above is unimplemented.** No `source` field exists in the schema, model, or database,
    so simulated events cannot be distinguished from real detections.
 4. **`shared/` simulation harness exists** (`shared/simulate.py`), but the project has no

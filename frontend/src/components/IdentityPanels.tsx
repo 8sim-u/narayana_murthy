@@ -66,10 +66,14 @@ export function UnknownPeoplePanel() {
       setFormError('This sighting has no snapshot, so it cannot be enrolled.');
       return;
     }
+    if (!item.camera_id) {
+      setFormError('This sighting has no camera ID, so consent cannot be checked.');
+      return;
+    }
     setFormError(null);
     setEnrollingKey(key);
     try {
-      await enrollFace(name, item.snapshot_path);
+      await enrollFace(name, item.snapshot_path, item.camera_id);
       setUnknowns((prev) => prev.filter((u, i) => sightingKey(u, i) !== key));
       setNames((prev) => {
         const next = { ...prev };

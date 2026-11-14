@@ -1,8 +1,8 @@
 # WAMSS Vision
 
 Edge-side person detection for WAMSS (Person A). Runs YOLOv8 + ByteTrack on
-one or more camera streams and POSTs detection events to the backend
-`/event` endpoint.
+one or more camera streams and POSTs consented person events to `/event` or
+aggregate-only privacy events to `/event/aggregate`.
 
 **Live-camera verification has NOT been done.** This pipeline has been
 syntax-checked only. Expect to shake out camera connectivity, model
@@ -43,7 +43,9 @@ and set your values (a real `.env` is never committed):
   `WAMSS_CAMERAS='{"CAM_01":"http://10.0.0.5:8080/video"}'`
 - `WAMSS_CAM_<id>_URL` - numbered fallback, one var per camera, e.g.
   `WAMSS_CAM_01_URL=http://10.0.0.5:8080/video` (key becomes `CAM_<id>`)
-- `WAMSS_BACKEND_URL` - event endpoint. Default: `http://localhost:8000/event`
+- `WAMSS_BACKEND_URL` - person-event endpoint. Default: `http://localhost:8000/event`
+- `WAMSS_AGGREGATE_BACKEND_URL` - optional privacy aggregate endpoint. Default:
+  derived by replacing the trailing `/event` with `/event/aggregate`.
 - `WAMSS_MODEL_PATH` - YOLO weights path. Default: `yolov8n.pt`
 - `WAMSS_EVENT_INTERVAL` - minimum seconds between event POSTs per camera.
   Default: `1.0`
@@ -69,68 +71,82 @@ Force windowed mode on a machine with a display by setting
 
 ## Privacy mode
 
-`WAMSS_PRIVACY_MODE=1` switches the pipeline to presence-without-identity:
-it reports that someone is there, never who. The recipe is MediaPipe
-on-device, frames kept strictly in memory, and person-count / coarse
-pose / occupancy aggregates only.
+`WAMSS_PRIVACY_MODE=1` enables aggregate-only occupancy counting. Frames are
+processed in memory; the edge node sends only camera ID, occupied/vacant state,
+and an aggregate person count to `/event/aggregate`. It does not generate pose,
+track IDs, employee names, coordinates, bounding boxes, or snapshots.
 
-Guarantees (enforced in `multicamera.py`, see the disk-write audit and the
-privacy-guarantee comment block there):
+The backend accepts that payload only through a strict schema that rejects extra
+identity-like fields, and stores it in a separate aggregate table with no
+person-level columns. The table is covered by `WAMSS_RETENTION_DAYS` in
+`backend/scripts/purge_old_logs.py`. The privacy endpoint is not a person-event
+fallback: `/event` rejects privacy-mode requests and anonymous or unconsented
+person events before movement, geofence, or alert processing. Each camera must
+remain in aggregate mode for the aggregate endpoint to accept it; identity mode
+requires explicit camera configuration plus active employee consent.
 
-- **In-memory only.** Frames are processed in memory and never written to
-  disk. Every frame-persistence call goes through `save_frame_snapshot()`,
-  which is the only place `cv2.imwrite` may be called.
-- **Aggregates only.** The backend receives occupancy transitions
-  (`occupied` / `vacant`), `person_count`, a coarse `pose`
-  (`standing` / `sitting` / `unknown`), and `privacy_mode: true`. There are
-  no track ids and no bounding boxes in privacy-mode events.
-- **No identity, no gaze, no recognition.** Identity/gaze/recognition model
-  paths are explicitly refused by `_assert_privacy_model_allowed()`; the two
-  allowed kinds are on-device person pose and face detection used only for
-  blurring.
-- **Face blurring on stored frames.** The only frames that may be stored are
-  anonymized occupancy snapshots (opt-in via `WAMSS_PRIVACY_SNAPSHOT_DIR`).
-  Faces are blurred first with MediaPipe face detection. If MediaPipe is not
-  installed, the frame is NOT stored and the reason is logged.
-- **No preview windows.** Privacy mode never opens `cv2.imshow`, even when a
-  display is available, so raw faces are never shown on screen.
+Occupancy transitions remain pending until the aggregate POST succeeds. Network
+or server failures cause the edge node to retry the transition instead of
+advancing its local state. MediaPipe is optional and counts face detections
+locally; without it, the worker uses YOLO's person count. Neither path sends
+per-person details off the camera node. Privacy mode never opens preview windows
+and never writes frames to disk.
 
 Configuration:
 
-- `WAMSS_PRIVACY_MODE` - `1` enables privacy mode. Default: `0` (existing
-  YOLO + ByteTrack path, unchanged).
-- `WAMSS_OCCUPANCY_DEBOUNCE_S` - seconds of sustained presence
-  (`person_count > 0`) before a zone reports `occupied`, and seconds of
-  sustained absence before it clears. Default: `5.0`.
-- `WAMSS_PRIVACY_SNAPSHOT_DIR` - optional directory for anonymized
-  occupancy snapshots (faces blurred before writing). Default: empty, which
-  means no snapshots are stored at all.
+- `WAMSS_PRIVACY_MODE` - `1` enables privacy mode. Default: `0`.
+- `WAMSS_OCCUPANCY_DEBOUNCE_S` - sustained presence/absence seconds before an
+  occupied/vacant transition. Default: `5.0`.
+- `WAMSS_AGGREGATE_BACKEND_URL` - optional explicit aggregate endpoint URL;
+  otherwise derived from `WAMSS_BACKEND_URL`.
 
-MediaPipe is an **optional** dependency: `pip install mediapipe` on the edge
-node to enable it. Without it, privacy mode falls back to the YOLO
-person-count aggregate path (no pose, no track ids) and refuses to store any
-snapshot. The non-privacy path never needs MediaPipe.
+**Not yet verified:** the debounce timing and detector count accuracy have not
+been checked against live hardware. No hardware or live-camera checks are part
+of this patch.
 
-**Not yet verified:** privacy mode has been unit-tested with synthetic numpy
-frames only. Before production use, validate against a real camera: the
-5 s debounce against real walk-bys, the standing/sitting heuristic against
-real postures, MediaPipe face-detection recall on your camera angles, and
-confirm no unblurred frame ever lands in `WAMSS_PRIVACY_SNAPSHOT_DIR`.
+## Face recognition (per-camera consent required)
 
-## Face recognition (non-privacy path)
+Identity is denied by default. A camera can identify anyone only when the
+backend explicitly configures it as `identity` and an employee has active,
+separate consent for that exact camera. All missing, malformed, or ambiguous
+configuration fails closed. The backend returns only that camera's consented
+gallery; if the consent check cannot be refreshed, vision emits no name.
 
-Enrolled people are recognised by name. Enroll with
-`python vision/enroll_face.py --photo <photo.jpg> --name "Full Name"`,
-which stores an embedding in `vision/faces/` (never commit those files;
-only `.gitkeep` and `README.md` belong there). The backend is insightface
-when installed, otherwise the OpenCV LBPH fallback; with neither,
-everyone stays `"unknown"` and the pipeline keeps working.
+Before enabling a camera, configure `WAMSS_CAMERA_PRIVACY_MODES` on the
+backend, for example `{"CAM_01":"identity"}`. Add a unique display-name to
+employee-ID mapping in `backend/app/attendance_identity_map.json`, and an
+affirmative record keyed by employee ID in
+`backend/app/attendance_camera_consents.json`:
+
+```json
+{"employee-001":{"consented":true,"recorded_at":"2026-11-14T10:00:00Z","camera_ids":["CAM_01"]}}
+```
+
+Set `consented` to `false` to withdraw consent; future recognition, enrollment,
+and named event storage stop. The application does not rewrite or delete old
+event history. `WAMSS_CONSENT_POLL_SECONDS` controls the vision node's refresh
+interval (default 1 second); a failed refresh disables identification.
+
+Enroll only through the backend, which verifies consent before storing or
+encoding the photo:
+
+```bash
+python vision/enroll_face.py --photo <photo.jpg> --name "Full Name" --camera-id CAM_01
+```
+
+The CLI forwards the image to `/faces/enroll`; it never creates a local
+unrestricted gallery. The backend is the source of truth for camera-specific
+embeddings. A detection without a current, unambiguous camera-specific consent match is
+discarded at the edge and cannot create a person-level movement event or alert;
+the backend independently rejects it if a client nevertheless submits one.
+Cameras not explicitly configured for identity mode accept no person events.
 
 How it works (`vision/identity_cache.py`, wired into `run_camera()`):
 
-- Every tracked person is identified, not just the first box in frame.
-  One event is posted per person per interval, each with its own
-  `person_name`, `person_name_confidence`, track id, position and dwell.
+- Only identities in the current camera-specific consent gallery are
+  considered by face matching. Other detections are discarded at the edge.
+  One event is posted per consented person per interval in identity mode; the
+  backend independently rechecks active consent before persistence or alerts.
 - Identification runs on first sight of a track, then re-verifies
   periodically (every `WAMSS_IDENTITY_RECHECK_FRAMES` frames or
   `WAMSS_IDENTITY_RECHECK_SECONDS` seconds per track, whichever comes
@@ -146,17 +162,19 @@ How it works (`vision/identity_cache.py`, wired into `run_camera()`):
 - The long-term memory is the enrolled gallery, not the cache: a person
   who leaves and returns under a new track id is re-identified from the
   gallery on first sight of the new track.
-- Every new track gets a first-sighting snapshot (JPEG crop) whether it
-  is recognised or not, so unknown people land in the review queue with
-  `snapshot_path` set in the event.
+- The camera loop does not save first-sighting snapshots; it therefore does
+  not create an unknown-person image queue from unconsented detections.
 - Face recognition never runs in privacy mode (`WAMSS_PRIVACY_MODE=1`).
 
 Configuration:
 
-- `WAMSS_FACE_ID` - `0` disables face recognition (all names
-  `"unknown"`). Default: `1`.
-- `WAMSS_SNAPSHOT_DIR` - directory for first-sighting snapshots.
-  Default: `data/snapshots`. Empty disables snapshots.
+- `WAMSS_FACE_ID` - `0` disables face recognition. Default: `1`, but it has no
+  effect without the backend's active camera-specific consent allow-list.
+- `WAMSS_CONSENT_POLL_SECONDS` - refresh rate for the camera-specific consent
+  allow-list. Default: `1.0`; errors clear the allow-list.
+- `WAMSS_SNAPSHOT_DIR` - retained for an explicit legacy snapshot helper.
+  The active camera loop does not save first-sighting images, regardless of
+  this setting.
 - `WAMSS_ROOM_CALIB` - optional room calibration JSON (see
   `vision/room_calib.py`). Default: empty (normalized frame coordinates).
 - `WAMSS_FACE_SIM_THRESHOLD` - insightface cosine-similarity match
