@@ -22,10 +22,19 @@ to /event (with the new optional edge fields); this module adds:
 
 Gallery access is camera-scoped: GET /faces/gallery requires a middleware-
 validated deployment API key, camera_id, identity mode, and active consent for
-each returned employee. If the key is unset, it fails closed. Vision refreshes
+each returned employee. When no deployment key is configured the gate is
+open (keyless dev and test setups); when one is configured the key is
+required. Vision refreshes
 this allow-list directly; the legacy unscoped gallery builder is disabled.
-Unscoped person-level map, identity, unknown-sighting, and snapshot views are
-disabled pending trusted manager and roster authorization. Geofence history is
+Unscoped person-level map, identity, unknown-sighting, and snapshot views
+are operational views gated by the deployment API key when one is
+configured, not by an employee token (auth decision, 2026-11-15; see
+app.main list_events). They are not employee-scoped because the dashboard
+and vision nodes authenticate with the deployment key, not employee tokens.
+Identity data in them is consent-filtered at the source instead: enrollment
+requires active camera consent, the live position registry scrubs a name
+the moment consent is withdrawn, and the gallery returns only
+active-consent identities for the requested camera. Geofence history is
 available only to the employee identified by a valid X-Employee-Token. The backend remains the source of truth
 for enrolled embeddings. Enroll/delete responses also carry a gallery version
 marker for clients that need to observe changes.
@@ -83,13 +92,6 @@ from app.models import (
 logger = logging.getLogger("wamss.api.edge")
 
 router = APIRouter(tags=["edge"])
-
-
-def _deny_unscoped_person_view():
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="This person-level view is disabled pending trusted manager and roster authorization",
-    )
 
 
 def _require_authenticated_deployment_key(request: Request):
@@ -273,7 +275,7 @@ class PositionOut(BaseModel):
     last_seen: str = Field(description="ISO 8601 timestamp of the last update")
 
 
-@router.get("/positions", response_model=List[PositionOut], dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/positions", response_model=List[PositionOut])
 def get_positions():
     """Live person positions from the in-memory registry.
 
@@ -544,7 +546,7 @@ class HeatPoint(BaseModel):
 MAX_HEATMAP_POINTS = 2000
 
 
-@router.get("/heatmap", response_model=List[HeatPoint], dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/heatmap", response_model=List[HeatPoint])
 def get_heatmap(
     camera_id: Optional[str] = Query(None, description="Filter to one camera; all cameras when omitted"),
     hours: int = Query(24, ge=1, le=24 * 30, description="Lookback window in hours"),
@@ -1051,7 +1053,7 @@ async def enroll_face(request: Request, db: Session = Depends(get_db)):
     return _store_enrollment(db, name, image_bytes, camera_id)
 
 
-@router.get("/faces", response_model=List[FaceInfo], dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/faces", response_model=List[FaceInfo])
 def list_faces(db: Session = Depends(get_db)):
     """List enrolled faces (name + enrollment time)."""
     try:
@@ -1153,7 +1155,7 @@ def delete_face(name: str, db: Session = Depends(get_db)):
     return {"name": name, "status": "deleted", "gallery_version": gallery_version}
 
 
-@router.get("/identities", response_model=List[IdentityOut], dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/identities", response_model=List[IdentityOut])
 def list_identities(db: Session = Depends(get_db)):
     """List the known-persons registry, most recently seen first.
 
@@ -1226,7 +1228,7 @@ class UnknownSighting(BaseModel):
 MAX_UNKNOWN_ROWS_SCANNED = 500
 
 
-@router.get("/unknowns", response_model=List[UnknownSighting], dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/unknowns", response_model=List[UnknownSighting])
 def list_unknowns(
     limit: int = Query(50, ge=1, le=200, description="Maximum sightings to return"),
     camera_id: Optional[str] = Query(None, description="Filter to one camera"),
@@ -1293,7 +1295,7 @@ def list_unknowns(
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
-@router.get("/snapshots/{filename}", dependencies=[Depends(_deny_unscoped_person_view)])
+@router.get("/snapshots/{filename}")
 def get_snapshot(filename: str):
     """Serve a snapshot JPEG from data/snapshots/ for dashboard thumbnails.
 

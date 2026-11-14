@@ -100,6 +100,10 @@ def test_attendance_disabled_still_requires_auth_and_is_empty(monkeypatch):
     self_id, _ = _seed(monkeypatch)
     from app import attendance
 
+    # The employee token map must be configured first: without it the
+    # endpoint fails closed with 503 (unconfigured), not 401, and the
+    # missing-token check below would never run.
+    monkeypatch.setenv("WAMSS_EMPLOYEE_TOKEN_HASHES", json.dumps({self_id: hashlib.sha256(b"valid").hexdigest()}))
     monkeypatch.setattr(attendance, "ATTENDANCE_ENABLED", False)
     client = _client()
     assert client.get("/attendance/daily").status_code in (401, 403)

@@ -13,6 +13,8 @@ from sqlalchemy.pool import StaticPool
 from app import activity_models  # noqa: F401 - registers ActivityLog
 from app import security_models  # noqa: F401 - registers SecurityEvent
 from app.activity import router as activity_router
+from app.activity_models import ActivityAuditHead
+from app.audit import AUDIT_HEAD_ID, GENESIS_HASH
 from app.auth import APIKeyAuthMiddleware
 from app.database import get_db
 from app.models import Base
@@ -36,6 +38,21 @@ def write_client(monkeypatch):
     )
     Base.metadata.create_all(bind=engine)
     testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    # Activity writes append to the hash chain, which needs its singleton
+    # head row. The main app seeds it at startup via ensure_audit_schema;
+    # this standalone fixture seeds the same genesis head directly.
+    seed = testing_session()
+    try:
+        seed.add(ActivityAuditHead(
+            id=AUDIT_HEAD_ID,
+            last_event_id=None,
+            last_hash=GENESIS_HASH,
+            pruned_through_event_id=None,
+            pruned_through_hash=GENESIS_HASH,
+        ))
+        seed.commit()
+    finally:
+        seed.close()
     app = FastAPI()
     app.include_router(activity_router)
     app.include_router(security_router)
@@ -101,9 +118,13 @@ def _security_event(employee_id):
     }
 
 
-def test_activity_and_security_writes_require_matching_employee_and_deployment_keys(
+def test_activity_and_security_writes_require_matching_employee_token(
     write_client, monkeypatch
 ):
+    """Employee writes bind to the token owner; the deployment key is not
+    also required for employee-token writes (documented POST /activity
+    exemption in app.auth: wearable clients must not hold the deployment
+    key). A deployment key alone, with no employee token, is rejected."""
     _configure_tokens(monkeypatch)
     record_b = _activity_record(EMPLOYEE_B)
     event_b = _security_event(EMPLOYEE_B)
@@ -113,11 +134,17 @@ def test_activity_and_security_writes_require_matching_employee_and_deployment_k
         headers=_headers(),
     )
     assert missing_employee.status_code == 401
-    missing_deployment = write_client.post(
+    key_only = write_client.post(
         "/activity", json={"records": [_activity_record(EMPLOYEE_A)]},
-        headers=_headers(TOKEN_A, api_key=None),
+        headers=_headers(api_key=API_KEY),
     )
-    assert missing_deployment.status_code == 401
+    assert key_only.status_code == 401
+
+    token_only = write_client.post(
+        "/activity", json={"records": [_activity_record(EMPLOYEE_A)]},
+        headers=_headers(TOKEN_A),
+    )
+    assert token_only.status_code == 201, token_only.text
 
     spoofed_activity = write_client.post(
         "/activity", json={"records": [record_b]}, headers=_headers(TOKEN_A)

@@ -17,7 +17,7 @@ from app import edge
 from app.database import SessionLocal
 from app.main import app
 from app.models import DetectionEvent
-from camera_test_utils import grant_camera_consent
+from tests.camera_test_utils import grant_camera_consent
 
 client = TestClient(app)
 

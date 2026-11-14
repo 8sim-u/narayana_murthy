@@ -108,7 +108,6 @@ def test_daily_attendance_is_opt_in_and_combines_only_enrolled_camera_and_active
     start = datetime.combine(day, time(11, 0), tzinfo=timezone.utc)
     identity_map = tmp_path / "attendance-map.json"
     identity_map.write_text(json.dumps({name: employee_id}), encoding="utf-8")
-    monkeypatch.setattr(attendance, "ATTENDANCE_IDENTITY_MAP_PATH", identity_map)
     monkeypatch.setattr(attendance, "ATTENDANCE_ENABLED", True)
     consent_file = tmp_path / "camera-consents.json"
     consent_file.write_text(json.dumps({employee_id: {
@@ -126,7 +125,8 @@ def test_daily_attendance_is_opt_in_and_combines_only_enrolled_camera_and_active
         db.add(DetectionEvent(
             camera_id="CAM_TEST", track_id="known-track", objects=["person"], confidence=0.99,
             zone="OFFICE", decision="ALLOW", alerts=[], timestamp=start,
-            person_name=name, person_name_confidence=0.95, dwell_seconds=60,
+            person_name=name, employee_id=employee_id,
+            person_name_confidence=0.95, dwell_seconds=60,
         ))
         db.add(DetectionEvent(
             camera_id="CAM_TEST", track_id="unknown-track", objects=["person"], confidence=0.99,
