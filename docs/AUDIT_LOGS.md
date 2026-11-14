@@ -18,6 +18,17 @@ integrity failure, and status 2 when it cannot access or prepare the database.
 On failure, it reports the first affected activity event ID and a short reason;
 it does not print employee names, window titles, or event contents.
 
+## Chain coverage
+
+The chain covers `activity_logs` only. Detection, security, geofence, and
+wellness events are not chained: they live in separate tables with their own
+retention and access rules, and none of them is purged as an oldest prefix,
+which is the case the checkpoint and head design exists to anchor. Chaining
+them would need a head per table plus cross-table ordering, with no added
+tamper evidence for the purge case. If a prefix purge is ever added for
+another event table, that table gets its own chain following the same
+pattern instead of this chain being widened.
+
 ## Existing records and retention
 
 On the first application startup after this feature is installed, existing

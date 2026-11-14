@@ -28,7 +28,13 @@ def audit_db():
 
 
 def _append_sample_records(db, count=2):
-    head = ActivityAuditHead(id=1, last_event_id=None, last_hash=GENESIS_HASH)
+    head = ActivityAuditHead(
+        id=1,
+        last_event_id=None,
+        last_hash=GENESIS_HASH,
+        pruned_through_event_id=None,
+        pruned_through_hash=GENESIS_HASH,
+    )
     db.add(head)
     db.flush()
     start = datetime(2026, 11, 14, 0, 0, tzinfo=timezone.utc)
