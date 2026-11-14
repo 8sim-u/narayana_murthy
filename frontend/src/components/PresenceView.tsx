@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  Chip, Dot, EmptyState, ErrorNotice, Reveal, SectionHead,
-  SkeletonCards, Stat, formatClock,
+  Chip, EmptyState, ErrorNotice, Reveal, SectionHead,
+  SkeletonRows, Stat,
 } from "./ui";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "http://localhost:8000";
@@ -49,6 +49,23 @@ function formatUtcClock(value: string | null): string {
   return Number.isNaN(instant.getTime())
     ? value
     : instant.toLocaleString(undefined, { timeZone: "UTC" });
+}
+
+// Plain words for how long ago something happened, without flashing or
+// ticking every second: re-rendered only when new data arrives.
+function agoInWords(iso: string | null): string {
+  if (!iso) return "never";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return String(iso);
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours < 24) return rest > 0 ? `${hours} h ${rest} min ago` : `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
 const STATE_TONE: Record<PresenceState, "ok" | "warn" | "bad" | "idle"> = {
@@ -105,6 +122,10 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
     return () => window.clearInterval(t);
   }, [load]);
 
+  // Stable, deterministic order: the table never reorders rows under the
+  // cursor when a refresh lands.
+  const stations = [...items].sort((a, b) => a.machine_id.localeCompare(b.machine_id));
+
   const anomalies = items.filter((i) => i.anomaly);
   const present = items.filter((i) => i.state === "PRESENT_AND_ACTIVE").length;
 
@@ -141,6 +162,66 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
             recent workstation input. Zone to machine mapping comes from the{" "}
             <code>WAMSS_ZONE_MAP</code> backend setting; the lookback window from{" "}
             <code>WAMSS_PRESENCE_WINDOW_SEC</code> (default 300 seconds).
+          </p>
+        </section>
+      </Reveal>
+
+      <Reveal>
+        <section className="panel" aria-label="Stations">
+          <SectionHead title="Who is here now" meta={`${items.length} stations`} />
+          {loading && items.length === 0 ? (
+            <SkeletonRows rows={4} height={52} />
+          ) : items.length === 0 ? (
+            <EmptyState
+              title="No workstations mapped"
+              body="Map camera zones to machines in the backend WAMSS_ZONE_MAP setting and stations will appear here."
+            />
+          ) : (
+            <div className="table-wrap">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th>Station</th>
+                    <th>Zone</th>
+                    <th>State</th>
+                    <th>Employee</th>
+                    <th>Camera sighting</th>
+                    <th>Workstation input</th>
+                    <th>Person</th>
+                    <th>Active</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stations.map((item) => {
+                    const tone = STATE_TONE[item.state] ?? "idle";
+                    return (
+                      <tr key={item.machine_id} className={item.anomaly ? "row-bad" : undefined}>
+                        <td className="id">{item.machine_id}</td>
+                        <td className="id">{item.zone}</td>
+                        <td>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                            <span className={`dot dot-${tone}`} aria-hidden="true" />
+                            <Chip tone={tone}>{STATE_LABELS[item.state] ?? item.state}</Chip>
+                          </span>
+                        </td>
+                        <td className="id">{item.employee_id || "-"}</td>
+                        <td className="num">{agoInWords(item.last_vision_seen)}</td>
+                        <td className="num">{agoInWords(item.last_activity_seen)}</td>
+                        <td>{item.person_present ? "yes" : "no"}</td>
+                        <td>{item.active ? "yes" : "no"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p style={{ color: "var(--text-2)", fontSize: 13, margin: "14px 0 0", maxWidth: "80ch" }}>
+            {Object.entries(STATE_DESCRIPTIONS).map(([state, text]) => (
+              <span key={state} style={{ display: "block" }}>
+                <strong>{STATE_LABELS[state as PresenceState]}</strong>. {text}
+              </span>
+            ))}
           </p>
         </section>
       </Reveal>
@@ -189,54 +270,6 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
           )}
         </section>
       </Reveal>
-
-      <section aria-label="Stations">
-        {loading && items.length === 0 ? (
-          <SkeletonCards count={3} />
-        ) : items.length === 0 ? (
-          <div className="panel">
-            <EmptyState
-              title="No workstations mapped"
-              body="Map camera zones to machines in the backend WAMSS_ZONE_MAP setting and stations will appear here."
-            />
-          </div>
-        ) : (
-          <div className="station-grid">
-            {items.map((item, i) => {
-              const tone = STATE_TONE[item.state] ?? "idle";
-              return (
-                <article
-                  key={item.machine_id}
-                  className={`station-card station-${tone} rise-stagger`}
-                  style={{ "--i": Math.min(i, 12) } as React.CSSProperties}
-                  aria-label={`${item.machine_id}: ${STATE_LABELS[item.state] ?? item.state}`}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                    <Dot tone={tone} label={STATE_LABELS[item.state] ?? item.state} />
-                    <strong style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{item.machine_id}</strong>
-                    <span style={{ marginLeft: "auto" }}>
-                      <Chip tone={tone === "ok" ? "ok" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : "idle"}>
-                        {STATE_LABELS[item.state] ?? item.state}
-                      </Chip>
-                    </span>
-                  </div>
-                  <p style={{ fontSize: 12.5, color: "var(--text-2)", margin: "0 0 12px" }}>
-                    {STATE_DESCRIPTIONS[item.state] ?? ""}
-                  </p>
-                  <dl style={{ margin: 0 }}>
-                    <div className="kv"><dt>Zone</dt><dd>{item.zone}</dd></div>
-                    <div className="kv"><dt>Person present</dt><dd>{item.person_present ? "yes" : "no"}</dd></div>
-                    <div className="kv"><dt>Workstation active</dt><dd>{item.active ? "yes" : "no"}</dd></div>
-                    <div className="kv"><dt>Employee</dt><dd>{item.employee_id || "-"}</dd></div>
-                    <div className="kv"><dt>Last seen (camera)</dt><dd>{formatClock(item.last_vision_seen)}</dd></div>
-                    <div className="kv"><dt>Last input (computer)</dt><dd>{formatClock(item.last_activity_seen)}</dd></div>
-                  </dl>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
     </div>
   );
 }
