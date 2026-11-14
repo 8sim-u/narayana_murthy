@@ -1,12 +1,17 @@
-// Room Map tab: live 2D floor plan of tracked persons, a heatmap overlay,
-// and an occupancy timeline. All data comes from the new tracking endpoints.
+// Room Map tab: live 2D floor plan of tracked persons, geofence zones drawn
+// from the same endpoint the Geofence tab uses, a heatmap overlay and an
+// occupancy timeline. Every coordinate comes normalized [0, 1] from the
+// backend; nothing here is simulated.
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getHeatmap, getOccupancy, getPositions } from '../api';
-import type { HeatPoint, OccupancyBucket, PersonPosition } from '../types';
-import { EmptyState, ErrorNotice, SectionHead, SkeletonCards, Stat } from './ui';
+import { fetchEvents, getGeofences, getHeatmap, getOccupancy, getPositions } from '../api';
+import type { GeofenceZone, HeatPoint, OccupancyBucket, PersonPosition } from '../types';
+import { Chip, EmptyState, ErrorNotice, SectionHead, SkeletonCards, Stat } from './ui';
 
 const POLL_MS = 2000;
 const OCCUPANCY_REFRESH_MS = 60000;
+const ZONES_REFRESH_MS = 30000;
+const EVENT_CAMERAS_REFRESH_MS = 10000;
+const EVENT_CAMERA_LIMIT = 100;
 const MAP_W = 1000;
 const MAP_H = 620;
 
@@ -22,6 +27,12 @@ function isKnownName(name: string | null | undefined): boolean {
 
 function prefersReducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// Same normalization the Geofence manager uses, so zones drawn on the
+// Geofence tab land pixel-identical here.
+function pointString(point: [number, number]): string {
+  return `${clamp01(point[0]) * MAP_W},${clamp01(point[1]) * MAP_H}`;
 }
 
 /* ------------------------------ occupancy chart ---------------------------- */
@@ -138,6 +149,8 @@ function OccupancyChart({ buckets }: { buckets: OccupancyBucket[] }) {
 
 export default function RoomMapTab() {
   const [positions, setPositions] = useState<PersonPosition[]>([]);
+  const [zones, setZones] = useState<GeofenceZone[]>([]);
+  const [eventCameras, setEventCameras] = useState<string[]>([]);
   const [heat, setHeat] = useState<HeatPoint[]>([]);
   const [occupancy, setOccupancy] = useState<OccupancyBucket[]>([]);
   const [heatmapOn, setHeatmapOn] = useState(false);
@@ -155,6 +168,28 @@ export default function RoomMapTab() {
       setError(e instanceof Error ? e.message : 'Failed to load positions');
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  // Camera identities come from the real event ledger (the same source the
+  // Vision Events tab uses). A camera that has reported events but currently
+  // has no live positions is shown as quiet, never dropped from the map.
+  const loadEventCameras = useCallback(async () => {
+    try {
+      const events = await fetchEvents(undefined, EVENT_CAMERA_LIMIT);
+      const seen = new Set<string>();
+      for (const e of events) seen.add(e.camera_id);
+      setEventCameras([...seen].sort());
+    } catch {
+      // Camera list is secondary; the map keeps the last known set.
+    }
+  }, []);
+
+  const loadZones = useCallback(async () => {
+    try {
+      setZones(await getGeofences());
+    } catch {
+      // Zones are config; the map still shows positions without them.
     }
   }, []);
 
@@ -178,13 +213,19 @@ export default function RoomMapTab() {
   useEffect(() => {
     void loadPositions();
     void loadOccupancy();
+    void loadZones();
+    void loadEventCameras();
     const pos = window.setInterval(() => { void loadPositions(); }, POLL_MS);
     const occ = window.setInterval(() => { void loadOccupancy(); }, OCCUPANCY_REFRESH_MS);
+    const zon = window.setInterval(() => { void loadZones(); }, ZONES_REFRESH_MS);
+    const cams = window.setInterval(() => { void loadEventCameras(); }, EVENT_CAMERAS_REFRESH_MS);
     return () => {
       window.clearInterval(pos);
       window.clearInterval(occ);
+      window.clearInterval(zon);
+      window.clearInterval(cams);
     };
-  }, [loadPositions, loadOccupancy]);
+  }, [loadPositions, loadOccupancy, loadZones, loadEventCameras]);
 
   useEffect(() => {
     void loadHeat();
@@ -193,7 +234,14 @@ export default function RoomMapTab() {
   const cameras = useMemo(() => {
     const seen = new Set<string>();
     for (const p of positions) seen.add(p.camera_id);
+    for (const c of eventCameras) seen.add(c);
     return [...seen].sort();
+  }, [positions, eventCameras]);
+
+  const positionCameras = useMemo(() => {
+    const seen = new Set<string>();
+    for (const p of positions) seen.add(p.camera_id);
+    return seen;
   }, [positions]);
 
   const knownCount = positions.filter((p) => isKnownName(p.person_name)).length;
@@ -247,8 +295,20 @@ export default function RoomMapTab() {
           <Stat label="People tracked" value={positions.length} mono tone="var(--ice)" />
           <Stat label="Identified" value={knownCount} mono />
           <Stat label="Unknown" value={positions.length - knownCount} mono />
-          <Stat label="Cameras reporting" value={cameras.length} mono />
+          <Stat label="Cameras seen" value={cameras.length} mono />
         </div>
+
+        {/* Camera line, ordered and complete: a camera with no live
+            positions is stated as quiet rather than silently missing. */}
+        {cameras.length > 0 && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+            {cameras.map((c) => (
+              <Chip key={c} tone={positionCameras.has(c) ? 'signal' : 'idle'}>
+                {positionCameras.has(c) ? `${c} live` : `${c} no live positions`}
+              </Chip>
+            ))}
+          </div>
+        )}
 
         {loading && positions.length === 0 ? (
           <SkeletonCards count={1} />
@@ -262,7 +322,7 @@ export default function RoomMapTab() {
             <svg
               viewBox={`0 0 ${MAP_W} ${MAP_H}`}
               role="img"
-              aria-label="Room map with live person positions"
+              aria-label="Room map with live person positions and geofence zones"
               style={{
                 width: '100%',
                 height: 'auto',
@@ -280,8 +340,7 @@ export default function RoomMapTab() {
                 </radialGradient>
               </defs>
 
-              {/* room outline and faint grid */}
-              <rect x="1" y="1" width={MAP_W - 2} height={MAP_H - 2} rx="8" fill="none" stroke="none" />
+              {/* faint grid */}
               {Array.from({ length: 9 }).map((_, i) => (
                 <line
                   key={`v${i}`}
@@ -310,6 +369,32 @@ export default function RoomMapTab() {
                 CAMERA PLAN VIEW
               </text>
 
+              {/* geofence zones, exactly the polygons the Geofence tab draws */}
+              {zones.map((zone, i) => (
+                <g key={zone.id}>
+                  <polygon
+                    points={zone.polygon.map(pointString).join(' ')}
+                    fill={i % 2 === 0 ? 'var(--ice)' : 'var(--iris)'}
+                    fillOpacity="0.16"
+                    stroke={i % 2 === 0 ? 'var(--ice)' : 'var(--iris)'}
+                    strokeWidth="3"
+                    strokeLinejoin="round"
+                  />
+                  {zone.polygon[0] && (
+                    <text
+                      x={clamp01(zone.polygon[0][0]) * MAP_W + 8}
+                      y={clamp01(zone.polygon[0][1]) * MAP_H - 8}
+                      fontSize="14"
+                      fontWeight="600"
+                      fill="var(--ink)"
+                      fontFamily="var(--font-display)"
+                    >
+                      {zone.name}
+                    </text>
+                  )}
+                </g>
+              ))}
+
               {/* heatmap density layer */}
               {heatmapOn &&
                 heat.map((h, i) => {
@@ -328,7 +413,7 @@ export default function RoomMapTab() {
                   );
                 })}
 
-              {/* person markers */}
+              {/* person markers: ice for identified (with confidence), quiet ink for unknown */}
               {positions.map((p) => {
                 const cx = clamp01(p.x) * MAP_W;
                 const cy = clamp01(p.y) * MAP_H;
@@ -338,16 +423,12 @@ export default function RoomMapTab() {
                   Number.isFinite(p.person_name_confidence)
                     ? p.person_name_confidence.toFixed(2)
                     : null;
-                const label = known
-                  ? conf !== null
-                    ? `${p.person_name as string} ${conf}`
-                    : (p.person_name as string)
-                  : 'Unknown';
+                const label = known ? (p.person_name as string) : 'Unknown';
                 const fill = known ? 'var(--ice)' : 'var(--ink)';
                 const opacity = known ? 1 : 0.55;
                 return (
                   <g key={p.track_id} opacity={opacity}>
-                    <title>{`${label} (${p.track_id}) on ${p.camera_id}`}</title>
+                    <title>{`${label}${conf ? ` ${conf}` : ''} (${p.track_id}) on ${p.camera_id}`}</title>
                     {known && (
                       <circle cx={cx} cy={cy} r={15} fill="none" stroke="var(--iris)" strokeWidth="1.5" opacity="0.7" />
                     )}
@@ -365,11 +446,16 @@ export default function RoomMapTab() {
                       y={cy + 30}
                       textAnchor="middle"
                       fontSize="13"
-                      fill={known ? 'var(--text-1)' : 'var(--text-2)'}
+                      fill={known ? 'var(--ink)' : 'var(--text-2)'}
                       fontWeight={known ? 600 : 400}
-                      fontFamily="var(--font-display)"
+                      fontFamily={known ? 'var(--font-display)' : 'var(--font-mono)'}
                     >
                       {label}
+                      {known && conf ? (
+                        <tspan fontFamily="var(--font-mono)" fontWeight="400" fill="var(--text-2)">
+                          {' '}{conf}
+                        </tspan>
+                      ) : null}
                     </text>
                   </g>
                 );
@@ -387,11 +473,15 @@ export default function RoomMapTab() {
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--ice)', display: 'inline-block' }} />
-                Identified person
+                Identified person, confidence next to the name
               </span>
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--ink)', opacity: 0.55, display: 'inline-block' }} />
                 Unknown track
+              </span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 14, height: 14, borderRadius: '50%', background: 'var(--iris)', opacity: 0.35, display: 'inline-block' }} />
+                Geofence zone
               </span>
               {heatmapOn && (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -400,7 +490,7 @@ export default function RoomMapTab() {
                 </span>
               )}
               <span style={{ marginLeft: 'auto' }}>
-                Positions are normalized room coordinates reported by the vision pipeline.
+                Positions and zones are normalized room coordinates from the backend.
               </span>
             </figcaption>
           </figure>
