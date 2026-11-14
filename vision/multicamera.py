@@ -237,6 +237,15 @@ def _gallery_base_from_backend():
     return raw.rstrip("/")
 
 
+# Gallery sync: a running node picks up dashboard enrollments without a
+# restart by polling GET /faces/gallery/version on the backend and, on a
+# version change, re-fetching GET /faces/gallery and writing one JSON
+# sidecar per entry into vision/faces/, then calling
+# face_id.reload_gallery() so the new names take effect. Poll every 30 s
+# by default; 0 disables polling. Never runs in privacy mode.
+GALLERY_POLL_SECONDS = _parse_float(
+    os.environ.get("WAMSS_GALLERY_POLL_SECONDS"), 30.0)
+
 # Seconds between camera-scoped consent gallery refreshes.
 # A failed request clears the local allow-list, so a stale cached identity
 # cannot be emitted after consent withdrawal or loss of backend connectivity.
@@ -416,27 +425,153 @@ def _identify_crop_scored(frame, bbox, gallery_entries=None):
         return "unknown", None
 
 
-class GalleryRefresher:
-    """Deprecated, unscoped gallery API retained as an inert compatibility shim.
+def _sanitize_gallery_name(name):
+    """Filesystem-safe gallery filename stem, mirroring enroll_face.py."""
+    safe = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+    return safe or "unnamed"
 
-    The active camera loop uses CameraGallery, whose backend request is scoped
-    to a camera and whose entries are filtered by active employee consent.
+
+class GalleryRefresher:
+    """Poll the backend gallery version and sync new enrollments to disk.
+
+    The backend serves GET /faces/gallery/version ({"version": N, ...})
+    and GET /faces/gallery ([{"name": ..., "embedding": [...]}, ...]).
+    On a version change this writes one JSON sidecar per entry into the
+    vision gallery dir (the format face_id._load_gallery reads) and calls
+    face_id.reload_gallery(). Entries with no embedding (the backend
+    stores a placeholder when no face library was available) are skipped:
+    they cannot match anything. Sidecars this refresher previously wrote
+    for names absent from the new gallery are deleted, so a dashboard
+    delete takes effect; files it did not write are never touched.
+
+    Never raises and never stalls the caller: every HTTP, JSON, or disk
+    failure is logged and the local gallery is kept. A failed poll does
+    not advance the seen version, so the next due poll retries. Never
+    runs in privacy mode: enabled is False when privacy_mode is True,
+    and run_camera_privacy never constructs one.
     """
 
     def __init__(self, base_url, poll_seconds=30.0, face_id_module=None,
                  http_get=None, privacy_mode=False):
         self.base_url = (base_url or "").rstrip("/")
-        self.poll_seconds = poll_seconds
+        try:
+            self.poll_seconds = float(poll_seconds)
+        except (TypeError, ValueError):
+            self.poll_seconds = 30.0
         self._face_id = face_id_module
-        self._http_get = http_get
+        self._http_get = http_get  # injectable for tests; else requests.get
         self._privacy_mode = bool(privacy_mode)
+        self._last_version = None
+        self._last_poll = None
+        self._managed = {}  # sidecar filename -> person name
 
     @property
     def enabled(self):
-        return False
+        return (not self._privacy_mode and self.poll_seconds > 0
+                and bool(self.base_url) and self._face_id is not None)
 
     def maybe_refresh(self, now):
-        return False
+        """Poll when due. Returns True when the gallery was reloaded."""
+        if not self.enabled:
+            return False
+        if (self._last_poll is not None
+                and now - self._last_poll < self.poll_seconds):
+            return False
+        self._last_poll = now
+        try:
+            version = self._fetch_version()
+        except Exception as exc:
+            print(f"[gallery] version poll failed ({exc}); keeping "
+                  f"local gallery")
+            return False
+        if version == self._last_version:
+            return False
+        try:
+            entries = self._fetch_gallery()
+            payloads = self._validate(entries)
+        except Exception as exc:
+            print(f"[gallery] gallery fetch failed ({exc}); keeping "
+                  f"local gallery")
+            return False
+        try:
+            self._apply(payloads)
+        except Exception as exc:
+            print(f"[gallery] gallery apply failed ({exc}); keeping "
+                  f"local gallery")
+            return False
+        self._last_version = version
+        return True
+
+    def _get(self, path):
+        get = self._http_get if self._http_get is not None else requests.get
+        response = get(self.base_url + path, timeout=2.0,
+                       headers=_backend_headers())
+        response.raise_for_status()
+        return response
+
+    def _fetch_version(self):
+        data = self._get("/faces/gallery/version").json()
+        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ValueError(
+                "gallery version response has no integer version")
+        return version
+
+    def _fetch_gallery(self):
+        data = self._get("/faces/gallery").json()
+        if not isinstance(data, list):
+            raise ValueError("gallery response is not a list")
+        return data
+
+    def _validate(self, entries):
+        """Validated (filename, payload) pairs; skips unmatchable entries."""
+        payloads = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            embedding = entry.get("embedding")
+            if (not name or not isinstance(name, str)
+                    or not isinstance(embedding, list) or not embedding):
+                continue
+            try:
+                vector = [float(v) for v in embedding]
+            except (TypeError, ValueError):
+                continue
+            filename = _sanitize_gallery_name(name) + ".json"
+            payloads.append((filename, {
+                "name": name,
+                "method": "insightface",
+                "embedding": vector,
+                "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime()),
+                "source": "backend-sync",
+            }))
+        return payloads
+
+    def _apply(self, payloads):
+        gallery_dir = self._face_id.GALLERY_DIR
+        os.makedirs(gallery_dir, exist_ok=True)
+        seen = set()
+        for filename, payload in payloads:
+            path = os.path.join(gallery_dir, filename)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            seen.add(filename)
+            self._managed[filename] = payload["name"]
+        removed = 0
+        for filename in list(self._managed):
+            if filename not in seen:
+                try:
+                    os.remove(os.path.join(gallery_dir, filename))
+                    removed += 1
+                except OSError as exc:
+                    print(f"[gallery] WARNING: could not remove stale "
+                          f"sidecar {filename}: {exc}")
+                del self._managed[filename]
+        self._face_id.reload_gallery()
+        print(f"[gallery] synced {len(payloads)} entries, removed "
+              f"{removed} stale")
 
 
 class CameraGallery:
@@ -510,18 +645,25 @@ class CameraGallery:
 
 
 def _build_gallery_refresher():
-    """Legacy unscoped gallery sync is disabled for consent safety.
+    """Gallery sync for the non-privacy path, or None when disabled.
 
-    run_camera() uses CameraGallery, which fetches a camera-specific allow-list
-    and clears it when the backend is unavailable.
+    Disabled when privacy mode is on, face recognition is off, no
+    gallery base URL is configured, polling is set to 0, or face_id is
+    unavailable.
     """
-    return None
+    if PRIVACY_MODE or not FACE_ID_ENABLED:
+        return None
+    if not GALLERY_BASE_URL or GALLERY_POLL_SECONDS <= 0:
+        return None
+    if _face_id is None:
+        return None
+    return GalleryRefresher(GALLERY_BASE_URL, GALLERY_POLL_SECONDS,
+                            _face_id, privacy_mode=PRIVACY_MODE)
 
 
 def _build_person_event(camera_id, track_key, person_name, name_confidence,
                         position_x, position_y, snapshot_path,
-                        dwell_seconds, max_confidence,
-                        position_bounds=(1.0, 1.0)):
+                        dwell_seconds, max_confidence):
     """One per-person detection event for the backend /event endpoint.
 
     person_name_confidence is the smoothed face-match confidence in 0..1,
@@ -684,6 +826,11 @@ def run_camera(camera_id, stream_url):
             lambda frame, bbox: _identify_crop_scored(
                 frame, bbox, gallery_entries=camera_gallery.entries))
 
+    # Gallery sync: dashboard enrollments reach this node without a restart.
+    # None when disabled; never built in privacy mode (run_camera_privacy is
+    # a separate loop that never touches it).
+    gallery_refresher = _build_gallery_refresher()
+
     if not cap.isOpened():
         print(f"[{camera_id}] ERROR: Cannot open camera stream")
         return
@@ -711,6 +858,12 @@ def run_camera(camera_id, stream_url):
 
             boxes = results[0].boxes
             now = time.time()
+
+            # Gallery sync check: cheap time comparison per frame; the
+            # HTTP poll itself runs at most every GALLERY_POLL_SECONDS
+            # and never raises (failures log and keep the local gallery).
+            if gallery_refresher is not None:
+                gallery_refresher.maybe_refresh(now)
 
             # Refresh active camera consent before any new identity lookup.
             # A change (including an error/revocation) clears sticky track
@@ -959,6 +1112,9 @@ def main():
               f"{GALLERY_BASE_URL or 'disabled'}"
               + (f" (refresh {CONSENT_POLL_SECONDS}s)"
                  if GALLERY_BASE_URL else " (identity unavailable)"))
+        if GALLERY_BASE_URL and GALLERY_POLL_SECONDS > 0 and FACE_ID_ENABLED:
+            print(f"[config] Gallery sync: {GALLERY_BASE_URL} "
+                  f"(poll {GALLERY_POLL_SECONDS}s)")
 
     threads = []
 
