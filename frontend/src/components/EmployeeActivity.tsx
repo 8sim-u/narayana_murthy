@@ -148,6 +148,23 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
     [records]
   );
 
+  // The strain summary can repeat a machine/employee pair as new samples
+  // arrive. Keep only the newest sample per pair so the table shows one
+  // honest row per machine.
+  const latestStrain = useMemo(() => {
+    const latest = new Map<string, StrainSummary>();
+    for (const s of strain) {
+      const key = `${s.machine_id}/${s.employee_id}`;
+      const prev = latest.get(key);
+      if (!prev || (s.last_seen ?? "") > (prev.last_seen ?? "")) {
+        latest.set(key, s);
+      }
+    }
+    return [...latest.values()].sort((a, b) =>
+      `${a.employee_id}${a.machine_id}`.localeCompare(`${b.employee_id}${b.machine_id}`),
+    );
+  }, [strain]);
+
   const maxAppMin = appUsage.length > 0 ? Math.max(...appUsage.map((item) => item.minutes)) : 1;
 
   const idleStats = useMemo(() => {
@@ -244,10 +261,10 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
 
       <Reveal>
         <section className="panel" aria-label="Strain per Machine">
-          <SectionHead title="Strain per Machine" meta={`${strain.length} machines`} />
-          {loading && strain.length === 0 ? (
+          <SectionHead title="Strain per Machine" meta={`${latestStrain.length} machines`} />
+          {loading && latestStrain.length === 0 ? (
             <SkeletonRows rows={3} height={56} />
-          ) : strain.length === 0 ? (
+          ) : latestStrain.length === 0 ? (
             <EmptyState title="No strain data" body="Strain summaries appear here once workstation agents start reporting." />
           ) : (
             <div className="table-wrap">
@@ -263,7 +280,7 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
                   </tr>
                 </thead>
                 <tbody>
-                  {strain.map((s) => {
+                  {latestStrain.map((s) => {
                     const color =
                       s.strain_level === "green" ? "var(--ok)"
                         : s.strain_level === "amber" ? "var(--warn)"
