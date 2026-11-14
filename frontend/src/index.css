@@ -506,6 +506,22 @@ table.ledger {
 .ledger .num { font-family: var(--font-mono); font-size: 12.8px; white-space: nowrap; }
 .ledger .id  { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2); }
 
+/* Sticky-header variant for long live ledgers. The wrap scrolls vertically
+   so the thead stays visible; box-shadow draws the header rule because
+   border-collapse borders do not stick. */
+.table-wrap.ledger-scroll {
+  max-height: calc(100vh - 330px);
+  min-height: 220px;
+  overflow-y: auto;
+}
+.table-wrap.ledger-scroll .ledger thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 var(--rule);
+}
+
 tr.row-alert { background: var(--warn-soft); }
 tr.row-alert:hover { background: #f7e8d2; }
 tr.row-alert td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
