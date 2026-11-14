@@ -68,7 +68,9 @@ def test_geofence_history_requires_employee_token_and_hides_other_and_legacy_row
         response = client.get("/geofence-events", headers=headers[employee_a])
         assert response.status_code == 200, response.text
         assert response.headers["cache-control"] == "no-store, private"
-        assert response.headers["vary"] == "X-Employee-Token"
+        # CORSMiddleware appends Origin to Vary, so assert membership rather
+        # than an exact value.
+        assert "X-Employee-Token" in response.headers["vary"]
         result = response.json()
         assert len(result) == 1
         assert result[0]["zone_name"] == "A-zone"

@@ -4,6 +4,15 @@ The append head protects the newest event. A separate retention checkpoint
 anchors the first retained event after an oldest-prefix purge. The chain is
 not a signature: anyone able to rewrite the entire database, including both
 head and checkpoint, can rebuild it.
+
+Chain coverage decision: only activity_logs is chained. Detection, security,
+geofence, and wellness events live in separate tables with their own
+retention and access rules, and none of them is purged as an oldest prefix,
+which is the case the checkpoint and head design exists to anchor. Chaining
+them would need a head per table plus cross-table ordering, with no added
+tamper evidence for the purge case. If a prefix purge is ever added for
+another event table, give that table its own chain following this same
+pattern instead of widening this one.
 """
 
 from __future__ import annotations

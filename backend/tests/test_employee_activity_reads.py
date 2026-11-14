@@ -66,7 +66,9 @@ def test_activity_reads_require_employee_token_and_are_bound_to_self(client, mon
     assert activity.status_code == 200, activity.text
     assert activity.json()
     assert activity.headers["cache-control"] == "no-store, private"
-    assert activity.headers["vary"] == "X-Employee-Token"
+    # CORSMiddleware appends Origin to Vary, so assert membership rather
+    # than an exact value.
+    assert "X-Employee-Token" in activity.headers["vary"]
     assert {row["employee_id"] for row in activity.json()} == {employee_a}
     assert all("editor-b" not in row["app_name"] for row in activity.json())
 

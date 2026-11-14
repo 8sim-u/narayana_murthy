@@ -75,7 +75,7 @@ from app.camera_consent import camera_mode, has_active_camera_consent
 from app.database import get_db
 from app.employee_auth import require_employee
 from app.alerts import dispatch_alert
-from app.geofencing import normalize_position, observe_position, remember_position
+from app.geofencing import forget_position, normalize_position, observe_position, remember_position
 from app.models import (
     Base, DetectionEvent, FaceRecord, GeofenceEvent, GeofenceZone, PersonIdentity,
 )
@@ -525,6 +525,9 @@ def process_geofence_position(
     except SQLAlchemyError as exc:
         db.rollback()
         logger.warning("geofence transition persistence failed: %s", type(exc).__name__)
+        # observe_position already recorded the state; rewind it so the
+        # unpersisted transition re-emits on the next observation.
+        forget_position(camera_id, track_id, zones)
         return []
 
     remember_position(camera_id, track_id, point, zones)

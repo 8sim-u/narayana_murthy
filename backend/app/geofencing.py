@@ -86,12 +86,15 @@ def observe_position(
     zones: Iterable[Any],
     now: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
-    """Return entry/exit transitions for one observation without updating it.
+    """Return entry/exit transitions for one observation and record its state.
 
     A first observation inside a zone counts as an entry. A first observation
     outside establishes an outside state without emitting an exit. Missing
     observations do not imply an exit; only a later point outside the polygon
-    can produce one.
+    can produce one. The state is recorded here, so repeated observations
+    inside the same zone emit the entry exactly once. Callers that persist a
+    transition and then fail must rewind with forget_position, or the
+    unpersisted transition will not re-emit on the next observation.
     """
     with _state_lock:
         current_time = time.monotonic() if now is None else now
@@ -121,6 +124,8 @@ def observe_position(
                     "transition": "entry" if inside else "exit",
                 })
 
+            _zone_state[key] = {"inside": inside, "seen_at": current_time}
+
         return transitions
 
 
@@ -131,7 +136,11 @@ def remember_position(
     zones: Iterable[Any],
     now: Optional[float] = None,
 ) -> None:
-    """Record an observation after any associated transition is durable."""
+    """Re-record an observation. Kept for callers that used to persist first.
+
+    observe_position already records the state, so this is idempotent and
+    exists only so existing call sites keep working unchanged.
+    """
     with _state_lock:
         current_time = time.monotonic() if now is None else now
         for zone in zones:
@@ -140,3 +149,18 @@ def remember_position(
                 "inside": point_in_polygon(point, zone.polygon),
                 "seen_at": current_time,
             }
+
+
+def forget_position(
+    camera_id: str,
+    track_id: str,
+    zones: Iterable[Any],
+) -> None:
+    """Drop recorded zone state after a transition failed to persist.
+
+    The next observation is then treated as a first observation, so an entry
+    that was never stored re-emits instead of being lost silently.
+    """
+    with _state_lock:
+        for zone in zones:
+            _zone_state.pop((camera_id, track_id, int(zone.id)), None)
