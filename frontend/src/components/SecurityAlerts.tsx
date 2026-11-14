@@ -19,17 +19,10 @@ interface SecurityAlert {
 
 const REFRESH_MS = 15000;
 
-function eventTone(eventType: string, severity: string): "bad" | "warn" | "idle" {
-  // USB insert/remove: red. After-hours: amber. Write bursts: orange.
-  if (eventType === "usb_insert" || eventType === "usb_remove") return "bad";
-  if (eventType === "after_hours_activity") return "warn";
-  if (eventType === "file_write_burst") return "warn";
-  return severity === "high" ? "bad" : "warn";
-}
-
-function railClass(eventType: string, severity: string): string {
-  const t = eventTone(eventType, severity);
-  return t === "bad" ? "alert-rail-bad" : t === "warn" ? "alert-rail-warn" : "alert-rail-idle";
+function severityTone(severity: string): "bad" | "warn" | "idle" {
+  if (severity === "high") return "bad";
+  if (severity === "medium") return "warn";
+  return "idle";
 }
 
 function formatDetail(detail: Record<string, unknown> | null): string {
@@ -77,7 +70,7 @@ export default function SecurityAlerts({ officeId = "" }: { officeId?: string })
     return () => window.clearInterval(id);
   }, [load]);
 
-  const highCount = alerts.filter((a) => a.event_type === "usb_insert" || a.event_type === "usb_remove").length;
+  const highCount = alerts.filter((a) => a.severity === "high").length;
 
   return (
     <div className="rise">
@@ -85,7 +78,7 @@ export default function SecurityAlerts({ officeId = "" }: { officeId?: string })
         <section className="panel" aria-label="Security alerts">
           <SectionHead
             title="Anomaly Feed"
-            meta={`${alerts.length} alert${alerts.length === 1 ? "" : "s"}${highCount > 0 ? ` · ${highCount} USB` : ""} · refresh ${REFRESH_MS / 1000}s`}
+            meta={`${alerts.length} alert${alerts.length === 1 ? "" : "s"}${highCount > 0 ? ` · ${highCount} high severity` : ""} · refresh ${REFRESH_MS / 1000}s`}
             actions={
               <div className="form-row">
                 <Field label="Machine">
@@ -124,42 +117,56 @@ export default function SecurityAlerts({ officeId = "" }: { officeId?: string })
           )}
 
           {loading && alerts.length === 0 ? (
-            <SkeletonRows rows={4} height={72} />
+            <SkeletonRows rows={4} height={52} />
           ) : alerts.length === 0 && !error ? (
             <EmptyState
               title="No security anomalies"
-              body="The feed is quiet. USB events, after-hours activity and write bursts will surface here."
+              body="The feed is quiet. USB events, after-hours activity and write bursts will surface here as the workstation agents report them."
             />
           ) : (
-            <ul className="alert-feed">
-              {alerts.map((a, i) => (
-                <li
-                  key={a.id ?? `${a.timestamp}-${i}`}
-                  className={`alert-row-card ${railClass(a.event_type, a.severity)} rise-stagger`}
-                  style={{ "--i": Math.min(i, 16) } as React.CSSProperties}
-                >
-                  <Chip tone={eventTone(a.event_type, a.severity)}>
-                    {a.event_type.replace(/_/g, " ").toUpperCase()}
-                  </Chip>
-                  <div className="alert-row-body">
-                    <p className="alert-row-reason">{a.reason}</p>
-                    <p className="alert-row-meta">
-                      <span className="id">{a.machine_id}</span> &middot;{' '}
-                      <span className="id">{a.employee_id}</span> &middot;{' '}
-                      {new Date(a.timestamp).toLocaleString()}
-                      {formatDetail(a.detail) ? ` · ${formatDetail(a.detail)}` : ""}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <div className="table-wrap">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Severity</th>
+                    <th>Trigger</th>
+                    <th>What happened</th>
+                    <th>Machine</th>
+                    <th>Employee</th>
+                    <th>Source detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alerts.map((a, i) => (
+                    <tr
+                      key={a.id ?? `${a.timestamp}-${i}`}
+                      className={a.severity === "high" ? "row-bad" : a.severity === "medium" ? "row-alert" : undefined}
+                    >
+                      <td className="num">{new Date(a.timestamp).toLocaleString()}</td>
+                      <td><Chip tone={severityTone(a.severity)}>{a.severity}</Chip></td>
+                      <td className="id">{a.event_type}</td>
+                      <td>{a.reason}</td>
+                      <td className="id">{a.machine_id}</td>
+                      <td className="id">{a.employee_id}</td>
+                      <td className="num">
+                        {a.id !== null ? `agent event #${a.id}` : "agent event"}
+                        {formatDetail(a.detail) ? ` · ${formatDetail(a.detail)}` : ""}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <p style={{ color: "var(--text-2)", fontSize: 13, margin: "16px 0 0", maxWidth: "80ch" }}>
-            Signals: USB insert/remove (always flagged), after-hours activity (outside
-            WAMSS_WORK_HOURS), and file write bursts above WAMSS_DLP_WRITE_THRESHOLD_MB
-            per interval. Workstation agents report byte counts only; no file or keystroke
-            content is ever captured.
+            Every row names its source: the workstation agent event that raised it, with
+            metadata such as device label or megabytes written. Signals: USB insert and
+            remove (always flagged), after-hours activity (outside WAMSS_WORK_HOURS), and
+            file write bursts above WAMSS_DLP_WRITE_THRESHOLD_MB per interval.
+            Workstation agents report byte counts only; no file or keystroke content is
+            ever captured.
           </p>
         </section>
       </Reveal>
