@@ -63,19 +63,23 @@ GET /exports/focus.csv?employee_id=E001&start_date=2026-10-23&end_date=2026-10-3
 
 ### GET /analytics/trends?metric=focus|strain&weeks=N
 
-Returns weekly aggregates per employee plus team-level rollups.
-`weeks` is the number of trailing 7-day buckets ending today (default 4,
+Returns weekly aggregates for the caller only, plus a per-person rollup of
+the caller's own weeks. `weeks` is the number of trailing 7-day buckets ending today (default 4,
 max 52). Week 0 is the most recent 7 days; each bucket is labeled by its
 first calendar date (`week_start`).
 
 **metric=focus.** Per employee per week: the mean of that employee's daily
 focus scores for days with data (days with no activity rows are excluded,
-they do not drag the average down). Team rollup: mean, min, max of the
-per-employee weekly means, plus `employee_count`.
+they do not drag the average down). Personal rollup: the caller's own weekly
+mean; min and max equal that mean and `employee_count` is 1 when the caller
+has data that week, else 0. The endpoint is scoped to the caller's employee
+token, so no other employee's rows are read and the rollup is never a team
+average.
 
 **metric=strain.** Per employee per week: mean `strain_score` over scored
-rows plus counts of `green / amber / red / unknown` strain levels. Team
-rollup: mean of per-employee weekly averages and summed level counts.
+rows plus counts of `green / amber / red / unknown` strain levels. Personal
+rollup: the caller's own weekly average and level counts, for the same
+per-person scoping reason as above.
 Strain is a heuristic workload signal, not a medical measure.
 
 These trend rows summarize observed history and do not themselves forecast
@@ -83,7 +87,7 @@ slumps, bottlenecks, or causes. A separate, employee-private activity advisory
 is available in `GET /wellness/me`; it uses no health or task-count data. See
 [Private activity advisory](#private-activity-advisory) and
 [WELLNESS_PRIVACY.md](WELLNESS_PRIVACY.md). The rule is transparent and
-unvalidated, not a performance measure. Team analytics still do not grant
+unvalidated, not a performance measure. Trend analytics still do not grant
 manager access to individual history; unscoped person-level views remain
 disabled. The separate `/wellness/manager-checkins` endpoint is limited to a
 server-mapped manager token and exact roster, and requires each employee's
@@ -115,7 +119,7 @@ same employee token, accepts only a currently generated key, and stores one
 feedback row per employee and prediction. The personal view shows whether the
 hint was marked false positive and the employee's recent report count. The
 existing `WAMSS_RETENTION_DAYS` purge removes feedback with other retained
-records; it is never exposed through team trends or manager views.
+records; it is never exposed through trend rollups or manager views.
 
 Example:
 
@@ -133,9 +137,9 @@ Response shape (focus):
     {"week_start": "2026-10-24", "employee_id": "E001",
      "average_focus": 82.5, "days_with_data": 5}
   ],
-  "team": [
-    {"week_start": "2026-10-24", "average_focus": 74.2,
-     "min_focus": 61.0, "max_focus": 88.0, "employee_count": 6}
+  "personal": [
+    {"week_start": "2026-10-24", "average_focus": 82.5,
+     "min_focus": 82.5, "max_focus": 82.5, "employee_count": 1}
   ]
 }
 ```
@@ -175,6 +179,6 @@ plain anchor so the browser handles the download.
 
 **AnalyticsTab** (`frontend/src/components/AnalyticsTab.tsx`): renders
 `/analytics/trends` with a metric toggle (focus/strain) and a weeks
-selector. Team rollup is drawn as a pure-SVG bar chart (no chart
+selector. Personal rollup is drawn as a pure-SVG bar chart (no chart
 dependency); the latest week renders a per-employee table with CSS
 trend bars.

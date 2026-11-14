@@ -34,3 +34,16 @@ try {
 $Output = Join-Path $AgentDir "dist\$Name.exe"
 if (-not (Test-Path $Output)) { throw "Expected executable was not created: $Output" }
 Write-Host "Built $Output" -ForegroundColor Green
+
+# Ship the monitor config beside the executable. A real config.env is
+# copied as-is; otherwise the starter template is copied so the operator
+# can see what to fill in instead of hitting a bare exit at startup.
+$ConfigSource = Join-Path $AgentDir "config.env"
+$ConfigTarget = Join-Path $AgentDir "dist\config.env"
+if (Test-Path $ConfigSource) {
+    Copy-Item $ConfigSource $ConfigTarget -Force
+    Write-Host "Copied config.env beside the executable." -ForegroundColor Green
+} else {
+    Copy-Item (Join-Path $AgentDir "config.env.example") (Join-Path $AgentDir "dist\config.env.example") -Force
+    Write-Host "No config.env found; copied config.env.example beside the executable. Copy it to config.env and fill in the server URL before running." -ForegroundColor Yellow
+}
