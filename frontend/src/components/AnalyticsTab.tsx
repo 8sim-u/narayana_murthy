@@ -232,9 +232,11 @@ export default function AnalyticsTab() {
             </div>
           </div>
           <p style={{ color: "var(--text-2)", fontSize: 13, margin: 0, maxWidth: "80ch" }}>
+            This rollup is personal by design: the endpoint is scoped to one person, so
+            the chart shows that person's own history and never a team aggregate. {' '}
             {metric === "focus"
-              ? "Weekly mean of your daily focus scores. Days with no data are excluded."
-              : "Weekly mean of your strain scores with green/amber/red level counts. Strain is a heuristic workload signal, not a medical measure."}
+              ? "Weekly mean of the daily focus scores. Days with no data are excluded."
+              : "Weekly mean of the strain scores with green/amber/red level counts. Strain is a heuristic workload signal, not a medical measure."}
           </p>
         </section>
       </Reveal>
@@ -265,7 +267,7 @@ export default function AnalyticsTab() {
         <>
           <Reveal>
             <section className="panel" aria-label="Personal weekly average">
-              <SectionHead title="Your Average per Week" />
+              <SectionHead title="Your Average per Week" meta="personal scope" />
               <div key={`${metric}-${weeks}`}>
                 {metric === "focus" ? (
                   <BarChart
@@ -290,7 +292,7 @@ export default function AnalyticsTab() {
 
           <Reveal>
             <section className="panel" aria-label="Latest week">
-              <SectionHead title={`Latest Week (${latestWeek ?? "n/a"})`} meta="your week" />
+              <SectionHead title={`Latest Week (${latestWeek ?? "n/a"})`} meta="same numbers as the ledger, personal scope" />
               {latestEmployees.length === 0 ? (
                 <EmptyState title="No data for this week" body="No weekly rows were returned for the latest week." />
               ) : (
