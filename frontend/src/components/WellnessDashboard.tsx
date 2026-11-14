@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { getApiUrl, getMyGeofenceEvents } from '../api';
 import type { GeofenceEvent } from '../types';
+import { EmptyState } from './ui';
 
 type ActivityDay = { day: string; focus_minutes: number; tasks_completed: number | null };
 type AttendanceRecord = { employee_id: string; first_seen: string | null; last_seen: string | null; present_minutes: number; camera_minutes: number; computer_minutes: number; sources: string[] };
@@ -282,7 +283,7 @@ export default function WellnessDashboard() {
           <div className="form-row"><button className="btn" type="button" onClick={() => { void refresh(); void refreshGeofenceEvents(); void refreshAttendance(); }} disabled={loading}>Refresh</button><button className="btn" type="button" onClick={disconnect}>Disconnect</button></div>
         </div>
         <p className="wellness-privacy-note">Only aggregates for your own token are returned. The token is held in page memory, never local storage. Trend cards are self-coaching hints, not a diagnosis, medical advice, or performance rating. Managers never see raw health values or trend details; only a separate opt-in can enable a fixed supportive prompt and your employee ID for an authorized roster.</p>
-        {notice && <p className="notice notice-ok" role="status">{notice}</p>}
+        {notice && <p className="notice notice-info" role="status">{notice}</p>}
         {error && <p className="notice notice-error" role="alert">{error}</p>}
       </section>
 
@@ -331,16 +332,22 @@ export default function WellnessDashboard() {
         {geofenceEvents.length === 0 ? (
           <p className="section-meta">No crossings are available for this token yet.</p>
         ) : (
-          <div style={{ display: 'grid', gap: 8, maxHeight: 300, overflowY: 'auto' }}>
-            {geofenceEvents.map((event) => (
-              <div key={`${event.timestamp}:${event.zone_name}:${event.transition}`} style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '3px 10px', borderBottom: '1px solid var(--rule)', padding: '8px 0' }}>
-                <span className={`chip ${event.transition === 'entry' ? 'chip-ok' : 'chip-warn'}`}>
-                  {event.transition === 'entry' ? 'Entered' : 'Exited'}
-                </span>
-                <span><strong>{event.person_name}</strong> · {event.zone_name}</span>
-                <span className="section-meta" style={{ gridColumn: '2' }}>{new Date(event.timestamp).toLocaleString()}</span>
-              </div>
-            ))}
+          <div className="table-wrap">
+            <table className="ledger">
+              <thead>
+                <tr><th>Transition</th><th>Zone</th><th>You</th><th>Time</th></tr>
+              </thead>
+              <tbody>
+                {geofenceEvents.map((event) => (
+                  <tr key={`${event.timestamp}:${event.zone_name}:${event.transition}`}>
+                    <td><span className={`chip ${event.transition === 'entry' ? 'chip-ok' : 'chip-warn'}`}>{event.transition === 'entry' ? 'Entered' : 'Exited'}</span></td>
+                    <td>{event.zone_name}</td>
+                    <td>{event.person_name}</td>
+                    <td className="num">{new Date(event.timestamp).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </section>
@@ -423,7 +430,7 @@ export default function WellnessDashboard() {
       <section className="panel">
         <div className="section-head"><h2 className="section-title">Private trend checks</h2><span className="section-meta">No manager access · retention {data.data_retention_days} days</span></div>
         <p className="wellness-privacy-note">The activity-only advisory uses recorded active minutes already collected under your workstation consent; it does not need optional health consent. It is shown only in your token-authenticated view. Task-count comparisons are retrospective. Neither is a performance rating, validated forecast, or explanation of cause.</p>
-        {data.predictions.length === 0 ? <p>No current hint. The active-time advisory needs at least four active days in each of three completed 7-day windows, plus a 10% week-over-week decline and a 20% drop below the prior-two-week average. A separate task-count comparison needs repeated self-reports.</p> : data.predictions.map((p) => <article className="wellness-prediction" key={p.key}>
+        {data.predictions.length === 0 ? <EmptyState title="No current hint" body="The active-time advisory needs at least four active days in each of three completed 7-day windows, plus a 10% week-over-week decline and a 20% drop below the prior-two-week average. A separate task-count comparison needs repeated self-reports." /> : data.predictions.map((p) => <article className="wellness-prediction" key={p.key}>
           <h3>{p.title}</h3><p>{p.reason}</p><p><strong>Possible next step:</strong> {p.next_step}</p>
           <div className="form-row"><button className="btn" type="button" onClick={() => void mutate('/wellness/prediction-feedback', { prediction_key: p.key, false_positive: true }, 'Thanks - this hint was marked as a false positive.')}>This was a false positive</button><button className="btn" type="button" onClick={() => void mutate('/wellness/prediction-feedback', { prediction_key: p.key, false_positive: false }, 'Feedback saved.')}>Useful / not a false positive</button>{p.false_positive === true && <span className="section-meta">Marked false positive</span>}{p.false_positive === false && <span className="section-meta">Recorded as useful</span>}</div>
         </article>)}

@@ -82,13 +82,16 @@ export default function ManagerCheckins() {
         </label>
         <button className="btn btn-primary" type="submit" disabled={loading || !tokenInput.trim()}>{loading ? 'Connecting…' : 'Open authorized check-ins'}</button>
       </form>}
-      {notice && <p className="notice notice-ok" role="status">{notice}</p>}
+      {notice && <p className="notice notice-info" role="status">{notice}</p>}
       {error && <p className="notice notice-error" role="alert">{error}</p>}
       {managerToken && !loading && !error && (checkins.length === 0
         ? <p>No supportive check-in prompts are available for your authorized roster.</p>
-        : <ul>{checkins.map((item) => <li key={item.employee_id}>
-          <strong>{item.employee_id}</strong><p>{item.message}</p>
-        </li>)}</ul>)}
+        : <div className="table-wrap"><table className="ledger">
+          <thead><tr><th>Employee</th><th>Supportive prompt</th></tr></thead>
+          <tbody>{checkins.map((item) => <tr key={item.employee_id}>
+            <td className="id">{item.employee_id}</td><td>{item.message}</td>
+          </tr>)}</tbody>
+        </table></div>)}
       {loading && <p aria-live="polite">Loading authorized check-ins…</p>}
     </section>
   );
