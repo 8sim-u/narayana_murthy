@@ -98,14 +98,13 @@ def export_events_csv(
     camera_id: Optional[str] = Query(None, description="Filter by camera ID"),
     start_time: Optional[datetime] = Query(None, description="Filter events after or at this UTC datetime"),
     end_time: Optional[datetime] = Query(None, description="Filter events before or at this UTC datetime"),
-    authenticated_employee_id: str = Depends(require_employee),
     db: Session = Depends(get_db),
 ):
-    """Employee-token-scoped CSV export; events without a validated employee owner are excluded."""
+    """Operational CSV export of the event feed; same auth as GET /events
+    (deployment API key when configured, not an employee token). Legacy rows
+    with NULL employee_id are included, matching the JSON feed."""
     try:
-        query = db.query(DetectionEvent).filter(
-            DetectionEvent.employee_id == authenticated_employee_id
-        )
+        query = db.query(DetectionEvent)
         if camera_id is not None:
             query = query.filter(DetectionEvent.camera_id == camera_id)
         if start_time is not None:

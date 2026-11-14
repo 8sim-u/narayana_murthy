@@ -20,7 +20,6 @@ from app.camera_consent import camera_mode, consented_employee_id_for_name
 from app.models import AggregateOccupancyEvent, DetectionEvent
 from app.rules import RuleEngine
 from app.schemas import AggregateOccupancyCreate, EventCreate, EventDetail, EventResponse
-from app.employee_auth import require_employee
 
 # Workstation activity / presence / focus / security / policy routers.
 # The model imports must run before init_db() so Base.metadata.create_all
@@ -205,24 +204,34 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
             detail="This camera accepts aggregate-only events; person events are disabled",
         )
 
+    # Auth decision (documented, 2026-11-15): identity is stored only for a
+    # name that maps to exactly one employee with active consent for this
+    # camera. Anything else is stored downgraded as an anonymous detection:
+    # the name, the identification confidence, and the snapshot reference
+    # are dropped, but the detection itself (zone, objects, position,
+    # alerts) is still recorded so the vision pipeline keeps working for
+    # unrecognized people. Rejecting the event would lose the detection
+    # entirely and would make the anonymous feed unobservable. The
+    # downgraded event carries no employee_id, so it never enters the
+    # identity registry or geofence tracking.
     person_name = event_in.person_name
-    employee_id = (
-        consented_employee_id_for_name(person_name, event_in.camera_id)
-        if isinstance(person_name, str) and person_name.strip()
-        else None
-    )
-    if (not isinstance(person_name, str) or not person_name.strip()
-            or person_name.strip().casefold() == "unknown"
-            or employee_id is None):
-        # Anonymous/unconsented detections must not enter the person-event
-        # ledger, position registry, geofence tracker, or alert evaluation.
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="A uniquely mapped employee with active camera consent is required",
+    employee_id = None
+    if (
+        isinstance(person_name, str)
+        and person_name.strip()
+        and person_name.strip().casefold() != "unknown"
+    ):
+        employee_id = consented_employee_id_for_name(
+            person_name, event_in.camera_id
         )
-    person_name = person_name.strip()
-    person_name_confidence = event_in.person_name_confidence
-    snapshot_path = event_in.snapshot_path
+    if employee_id is None:
+        person_name = None
+        person_name_confidence = None
+        snapshot_path = None
+    else:
+        person_name = person_name.strip()
+        person_name_confidence = event_in.person_name_confidence
+        snapshot_path = event_in.snapshot_path
 
     # Evaluate configured decision rules
     rule_result = RuleEngine.evaluate(zone=event_in.zone, objects=event_in.objects)
@@ -318,14 +327,24 @@ def list_events(
     camera_id: Optional[str] = Query(None, description="Filter by camera ID"),
     start_time: Optional[datetime] = Query(None, description="Filter events after or at this UTC datetime"),
     end_time: Optional[datetime] = Query(None, description="Filter events before or at this UTC datetime"),
-    authenticated_employee_id: str = Depends(require_employee),
     db: Session = Depends(get_db),
 ):
-    """Return only events whose person name uniquely maps to the token owner."""
+    """Return detection events in reverse chronological order.
+
+    Auth decision (documented, 2026-11-15): the event feed is an
+    operational view gated by the deployment API key when one is configured,
+    not by an employee token. Employee scoping stays on the personal routes
+    (activity, presence, attendance, analytics, focus, hours, policy,
+    security, wellness, geofence history, and the activity/focus CSV
+    exports). Legacy rows with NULL employee_id stay visible here and in
+    the events CSV: they are anonymous detections from before employee
+    attribution existed, and downgraded events are anonymous by design, so
+    scoping this feed to one employee would hide exactly the rows the
+    consent downgrade is meant to make observable, and no employee token
+    could ever reveal them.
+    """
     try:
-        query = db.query(DetectionEvent).filter(
-            DetectionEvent.employee_id == authenticated_employee_id
-        )
+        query = db.query(DetectionEvent)
 
         if camera_id is not None:
             query = query.filter(DetectionEvent.camera_id == camera_id)
@@ -352,14 +371,13 @@ def list_events(
 @app.get("/events/{event_id}", response_model=EventDetail)
 def get_event(
     event_id: int,
-    authenticated_employee_id: str = Depends(require_employee),
     db: Session = Depends(get_db),
 ):
-    """Return one event only if it belongs to the employee token owner."""
+    """Retrieve one detection event by ID. Same auth as GET /events: the
+    deployment API key when configured, not an employee token."""
     try:
         event = db.query(DetectionEvent).filter(
             DetectionEvent.id == event_id,
-            DetectionEvent.employee_id == authenticated_employee_id,
         ).first()
     except SQLAlchemyError as exc:
         logger.error(f"Database query error for event {event_id}: {type(exc).__name__}")

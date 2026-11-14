@@ -25,6 +25,11 @@ Design notes
   ``/docs``, ``/openapi.json``, ``/redoc``. ``POST /activity`` may omit the
   deployment key only when it supplies an employee token; the handler still
   resolves that token and binds every record to its employee.
+* ``request.state.api_key_authenticated`` is set whenever a request passes
+  the deployment-key gate: a valid key was presented, or no key is
+  configured at all (the gate is open in keyless dev and test setups, so
+  endpoints that require a validated key must not fail closed there).
+  Exempt paths bypass the gate and are not marked.
 * Mounting order matters: register this middleware AFTER any error-handling
   middleware so auth rejections go through the same logging/error pipeline.
 """
@@ -118,9 +123,14 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request, call_next):
         has_employee_token = bool(request.headers.get("X-Employee-Token"))
-        if not self.enabled or _is_exempt(
-            request.url.path, request.method, has_employee_token
-        ):
+        if not self.enabled:
+            # No deployment key is configured, so the deployment-key gate is
+            # open. Mark the request as gate-passing so endpoints that
+            # require a validated key (face enroll, gallery, geofences) work
+            # in keyless dev and test setups instead of failing closed.
+            request.state.api_key_authenticated = True
+            return await call_next(request)
+        if _is_exempt(request.url.path, request.method, has_employee_token):
             return await call_next(request)
 
         provided = request.headers.get(API_KEY_HEADER)
