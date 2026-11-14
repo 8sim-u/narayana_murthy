@@ -1,9 +1,9 @@
-// TeamView - team-level dashboard view for WAMSS.
+// TeamView - team-level overview for WAMSS.
 //
-// Aggregates team metrics from the sibling routers (activity, focus,
-// presence). Every panel fetches independently and degrades to a graceful
-// "no data / endpoint unavailable" state if its endpoint is missing, so one
-// failed panel never breaks the others.
+// One per-person table (who, how much, any flags) backed by the same
+// per-employee endpoints the old panels used, plus a summary row of the
+// aggregates a manager actually needs. Every panel fetch degrades to a
+// quiet "-" cell, so one missing endpoint never breaks the others.
 //
 // Uses VITE_API_URL (or localhost:8000) and VITE_TEAM_EMPLOYEES
 // (comma-separated default employee ids) from env, plus a text field for
@@ -11,8 +11,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowClockwise } from '@phosphor-icons/react';
 import {
-  Chip, Dot, EmptyState, ErrorNotice, Field, Meter, Reveal,
-  SectionHead, SkeletonRows, Stat,
+  Chip, Dot, EmptyState, Field, Meter, Reveal,
+  SectionHead, SkeletonRows,
 } from './ui';
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8000';
@@ -58,13 +58,23 @@ interface PresenceRow {
   employee_id?: string;
   status?: string;
   state?: string;
+  anomaly?: boolean;
 }
 
-type PanelState<T> = {
-  status: 'idle' | 'loading' | 'ready' | 'empty' | 'unavailable';
-  data: T | null;
-  detail: string | null; // endpoint tried, or the error
-};
+// Per-person row assembled from four endpoints. Each cell carries its own
+// state so one unavailable endpoint shows "-" instead of failing the row.
+interface TeamRow {
+  employee_id: string;
+  focus: number | null;
+  focusError: boolean;
+  strainLevel: string | null; // green | amber | red | unknown | null (unavailable)
+  strainHeuristic: boolean;
+  breakCompliant: boolean | null;
+  breakError: boolean;
+  presence: string | null;
+  presenceAnomaly: boolean;
+  presenceError: boolean;
+}
 
 // ---------------------------------------------------------------- helpers
 
@@ -129,380 +139,188 @@ const DEFAULT_EMPLOYEES = parseEmployees(
   (import.meta.env.VITE_TEAM_EMPLOYEES as string | undefined) ?? '',
 );
 
-// ---------------------------------------------------------------- panels
-
-function PanelShell(props: { title: string; endpoint: string; children: React.ReactNode }) {
-  return (
-    <section className="panel" aria-label={props.title}>
-      <SectionHead title={props.title} meta={props.endpoint} />
-      {props.children}
-    </section>
-  );
+function strainTone(level: string | null): 'ok' | 'warn' | 'bad' | 'idle' | null {
+  if (level === null) return null;
+  if (level === 'green') return 'ok';
+  if (level === 'amber') return 'warn';
+  if (level === 'red') return 'bad';
+  return 'idle';
 }
 
-function scoreColor(score: number): string {
+function focusColor(score: number): string {
   if (score >= 70) return 'var(--ok)';
   if (score >= 40) return 'var(--warn)';
   return 'var(--bad)';
 }
 
-/** Average focus score across the team (GET /focus/daily per employee). */
-function FocusPanel({ employees, officeId }: { employees: string[]; officeId: string }) {
-  const [state, setState] = useState<PanelState<{ avg: number; n: number }>>({
-    status: 'idle', data: null, detail: null,
-  });
+// ---------------------------------------------------------------- fetch
 
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      if (employees.length === 0) {
-        setState({ status: 'empty', data: null, detail: 'no employees selected' });
-        return;
+async function loadTeamRow(employeeId: string, officeId: string): Promise<TeamRow> {
+  const row: TeamRow = {
+    employee_id: employeeId,
+    focus: null,
+    focusError: false,
+    strainLevel: null,
+    strainHeuristic: false,
+    breakCompliant: null,
+    breakError: false,
+    presence: null,
+    presenceAnomaly: false,
+    presenceError: false,
+  };
+  const q = encodeURIComponent(employeeId);
+
+  try {
+    const rows = asArray<FocusDailyRow>(
+      await getJson(withOffice(`/focus/daily?employee_id=${q}`, officeId)),
+    );
+    for (const r of rows) {
+      const s = pickFocusScore(r);
+      if (s !== null) {
+        row.focus = s;
+        break;
       }
-      setState({ status: 'loading', data: null, detail: null });
-      const scores: number[] = [];
-      const errors: string[] = [];
-      await Promise.all(
-        employees.map(async (id) => {
-          try {
-            const rows = asArray<FocusDailyRow>(
-              await getJson(withOffice(`/focus/daily?employee_id=${encodeURIComponent(id)}`, officeId)),
-            );
-            for (const r of rows) {
-              const s = pickFocusScore(r);
-              if (s !== null) scores.push(s);
-            }
-          } catch (err) {
-            errors.push(err instanceof Error ? err.message : String(err));
-          }
-        }),
+    }
+    if (row.focus === null) row.focusError = true;
+  } catch {
+    row.focusError = true;
+  }
+
+  // Break compliance: primary /focus/streaks, fallback to /focus/daily.
+  try {
+    const rows = asArray<StreakRow>(await getJson(`/focus/streaks?employee_id=${q}`));
+    const latest = rows[rows.length - 1];
+    row.breakCompliant = latest ? pickCompliant(latest) : null;
+  } catch {
+    try {
+      const rows = asArray<StreakRow>(
+        await getJson(withOffice(`/focus/daily?employee_id=${q}`, officeId)),
       );
-      if (cancelled) return;
-      if (scores.length > 0) {
-        setState({
-          status: 'ready',
-          data: { avg: scores.reduce((a, b) => a + b, 0) / scores.length, n: scores.length },
-          detail: null,
-        });
-      } else if (errors.length > 0) {
-        setState({ status: 'unavailable', data: null, detail: errors[0] });
-      } else {
-        setState({ status: 'empty', data: null, detail: 'no focus rows returned' });
+      const latest = rows[rows.length - 1];
+      row.breakCompliant = latest ? pickCompliant(latest) : null;
+    } catch {
+      // leave null
+    }
+  }
+  if (row.breakCompliant === null) row.breakError = true;
+
+  // Strain: primary strain-summary, heuristic idle-ratio fallback.
+  try {
+    const items = asArray<StrainSummaryItem>(await getJson('/activity/strain-summary'));
+    const mine = items.filter(
+      (it) => String(it.employee_id).toLowerCase() === employeeId.toLowerCase(),
+    );
+    if (mine.length > 0) {
+      // Worst level wins: red over amber over green over unknown.
+      const rank: Record<string, number> = { red: 3, amber: 2, green: 1, unknown: 0 };
+      let worst = mine[0].strain_level.toLowerCase();
+      for (const it of mine.slice(1)) {
+        const lvl = ['green', 'amber', 'red'].includes(it.strain_level.toLowerCase())
+          ? it.strain_level.toLowerCase()
+          : 'unknown';
+        if ((rank[lvl] ?? 0) > (rank[worst] ?? 0)) worst = lvl;
       }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [employees, officeId]);
-
-  return (
-    <PanelShell title="Team Focus Score" endpoint="GET /focus/daily?employee_id=...">
-      {state.status === 'loading' && <SkeletonRows rows={2} height={56} />}
-      {state.status === 'ready' && state.data && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}>
-          <Stat label="Average focus" value={state.data.avg.toFixed(1)} tone={scoreColor(state.data.avg)} />
-          <div style={{ flex: 1, minWidth: 160 }}>
-            <Meter value={state.data.avg} color={scoreColor(state.data.avg)} label={`Team average focus ${state.data.avg.toFixed(1)}`} />
-          </div>
-          <Stat label="Samples" value={state.data.n} mono />
-        </div>
-      )}
-      {state.status === 'empty' && (
-        <EmptyState title="No focus data" body={state.detail ?? 'Select employees to aggregate their focus scores.'} />
-      )}
-      {state.status === 'unavailable' && (
-        <ErrorNotice message={`Focus endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} />
-      )}
-    </PanelShell>
-  );
-}
-
-/** Strain Distribution across the team (GET /activity/strain-summary, heuristic fallback). */
-function StrainPanel({ employees, officeId }: { employees: string[]; officeId: string }) {
-  const [state, setState] = useState<PanelState<{ counts: Record<string, number>; heuristic: boolean }>>({
-    status: 'idle', data: null, detail: null,
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setState({ status: 'loading', data: null, detail: null });
-      // Primary: strain-summary from the activity router.
-      try {
-        const items = asArray<StrainSummaryItem>(await getJson('/activity/strain-summary'));
-        const wanted = new Set(employees.map((e) => e.toLowerCase()));
-        const counts: Record<string, number> = { green: 0, amber: 0, red: 0, unknown: 0 };
-        let matched = 0;
-        for (const it of items) {
-          if (wanted.size > 0 && !wanted.has(String(it.employee_id).toLowerCase())) continue;
-          const lvl = ['green', 'amber', 'red'].includes(String(it.strain_level).toLowerCase())
-            ? String(it.strain_level).toLowerCase()
-            : 'unknown';
-          counts[lvl] += 1;
-          matched += 1;
-        }
-        if (cancelled) return;
-        if (matched > 0) {
-          setState({ status: 'ready', data: { counts, heuristic: false }, detail: null });
-        } else {
-          setState({ status: 'empty', data: null, detail: 'strain summary returned no rows for these employees' });
-        }
-        return;
-      } catch {
-        // fall through to heuristic fallback
-      }
-      // Heuristic fallback: derive a rough workload signal from /activity idle ratios.
-      // Clearly labeled as heuristic, not a medical measure.
-      if (employees.length === 0) {
-        if (!cancelled) setState({ status: 'empty', data: null, detail: 'no employees selected' });
-        return;
-      }
-      try {
-        const counts: Record<string, number> = { green: 0, amber: 0, red: 0, unknown: 0 };
-        let matched = 0;
-        await Promise.all(
-          employees.map(async (id) => {
-            const items = asArray<ActivityItem>(
-              await getJson(withOffice(`/activity?employee_id=${encodeURIComponent(id)}&limit=100`, officeId)),
-            );
-            if (items.length === 0) return;
-            const idle = items.filter((i) => i.is_idle).length / items.length;
-            const lvl = idle >= 0.5 ? 'red' : idle >= 0.25 ? 'amber' : 'green';
-            counts[lvl] += 1;
-            matched += 1;
-          }),
-        );
-        if (cancelled) return;
-        if (matched > 0) {
-          setState({ status: 'ready', data: { counts, heuristic: true }, detail: null });
-        } else {
-          setState({ status: 'empty', data: null, detail: 'no activity rows for these employees' });
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setState({
-            status: 'unavailable',
-            data: null,
-            detail: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [employees, officeId]);
-
-  const counts = state.data?.counts;
-  const total = counts ? counts.green + counts.amber + counts.red + counts.unknown : 0;
-
-  return (
-    <PanelShell title="Strain Distribution" endpoint="GET /activity/strain-summary (fallback: /activity idle ratio)">
-      {state.status === 'loading' && <SkeletonRows rows={2} height={52} />}
-      {state.status === 'ready' && counts && (
-        <>
-          {state.data?.heuristic && (
-            <div className="notice notice-warn" role="note">
-              <p>Heuristic estimate from idle-time ratios, not real strain scores. Treat as approximate.</p>
-            </div>
-          )}
-          <div className="grid-4">
-            <div className="stat">
-              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Dot tone="ok" /> {counts.green}
-              </div>
-              <div className="stat-label">Green</div>
-            </div>
-            <div className="stat">
-              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Dot tone="warn" /> {counts.amber}
-              </div>
-              <div className="stat-label">Amber</div>
-            </div>
-            <div className="stat">
-              <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <Dot tone="bad" /> {counts.red}
-              </div>
-              <div className="stat-label">Red</div>
-            </div>
-            <Stat label="Employees" value={total} mono />
-          </div>
-        </>
-      )}
-      {state.status === 'empty' && (
-        <EmptyState title="No strain data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
-      )}
-      {state.status === 'unavailable' && (
-        <ErrorNotice message={`Endpoints unavailable: ${state.detail}. Tried /activity/strain-summary and /activity.`} />
-      )}
-    </PanelShell>
-  );
-}
-
-/** Break Compliance % across the team (GET /focus/streaks per employee). */
-function BreakCompliancePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
-  const [state, setState] = useState<PanelState<{ pct: number; compliant: number; n: number }>>({
-    status: 'idle', data: null, detail: null,
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      if (employees.length === 0) {
-        setState({ status: 'empty', data: null, detail: 'no employees selected' });
-        return;
-      }
-      setState({ status: 'loading', data: null, detail: null });
-      let compliant = 0;
-      let n = 0;
-      let firstError: string | null = null;
-      await Promise.all(
-        employees.map(async (id) => {
-          const q = encodeURIComponent(id);
-          // Primary: /focus/streaks (FocusStreaksOut per employee).
-          try {
-            const rows = asArray<StreakRow>(await getJson(`/focus/streaks?employee_id=${q}`));
-            const latest = rows[rows.length - 1];
-            const c = latest ? pickCompliant(latest) : null;
-            if (c !== null) {
-              n += 1;
-              if (c) compliant += 1;
-              return;
-            }
-          } catch (err) {
-            if (!firstError) firstError = err instanceof Error ? err.message : String(err);
-          }
-          // Fallback: today's break_compliance dict inside /focus/daily.
-          try {
-            const rows = asArray<StreakRow>(await getJson(withOffice(`/focus/daily?employee_id=${q}`, officeId)));
-            const latest = rows[rows.length - 1];
-            const c = latest ? pickCompliant(latest) : null;
-            if (c !== null) {
-              n += 1;
-              if (c) compliant += 1;
-            }
-          } catch {
-            // keep firstError from the primary attempt
-          }
-        }),
+      row.strainLevel = worst;
+    }
+  } catch {
+    try {
+      const items = asArray<ActivityItem>(
+        await getJson(withOffice(`/activity?employee_id=${q}&limit=100`, officeId)),
       );
-      if (cancelled) return;
-      if (n > 0) {
-        setState({ status: 'ready', data: { pct: (100 * compliant) / n, compliant, n }, detail: null });
-      } else if (firstError) {
-        setState({ status: 'unavailable', data: null, detail: firstError });
-      } else {
-        setState({ status: 'empty', data: null, detail: 'no streak rows returned' });
+      if (items.length > 0) {
+        const idle = items.filter((i) => i.is_idle).length / items.length;
+        row.strainLevel = idle >= 0.5 ? 'red' : idle >= 0.25 ? 'amber' : 'green';
+        row.strainHeuristic = true;
       }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [employees, officeId]);
+    } catch {
+      // leave null
+    }
+  }
 
-  return (
-    <PanelShell title="Break Compliance" endpoint="GET /focus/streaks?employee_id=... (fallback: /focus/daily)">
-      {state.status === 'loading' && <SkeletonRows rows={2} height={56} />}
-      {state.status === 'ready' && state.data && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 28, flexWrap: 'wrap' }}>
-          <Stat label="Break compliant" value={`${state.data.pct.toFixed(0)}%`} tone={state.data.pct >= 70 ? 'var(--ok)' : 'var(--warn)'} />
-          <div style={{ flex: 1, minWidth: 160 }}>
-            <Meter value={state.data.pct} color={state.data.pct >= 70 ? 'var(--ok)' : 'var(--warn)'} label={`Break Compliance ${state.data.pct.toFixed(1)} percent`} />
-          </div>
-          <Stat label="Compliant" value={`${state.data.compliant} of ${state.data.n}`} mono />
-        </div>
-      )}
-      {state.status === 'empty' && (
-        <EmptyState title="No streak data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
-      )}
-      {state.status === 'unavailable' && (
-        <ErrorNotice message={`Focus endpoint unavailable: ${state.detail}. This panel needs the /focus router.`} />
-      )}
-    </PanelShell>
-  );
-}
+  try {
+    const rows = asArray<PresenceRow>(await getJson(withOffice('/presence', officeId)));
+    const mine = rows.find(
+      (r) => String(r.employee_id ?? '').toLowerCase() === employeeId.toLowerCase(),
+    );
+    if (mine) {
+      row.presence = pickStatus(mine);
+      row.presenceAnomaly = !!mine.anomaly;
+    }
+  } catch {
+    row.presenceError = true;
+  }
 
-/** Team Presence snapshot (GET /presence). */
-function PresencePanel({ employees, officeId }: { employees: string[]; officeId: string }) {
-  const [state, setState] = useState<PanelState<{ counts: Record<string, number>; list: { id: string; status: string }[] }>>({
-    status: 'idle', data: null, detail: null,
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setState({ status: 'loading', data: null, detail: null });
-      try {
-        const rows = asArray<PresenceRow>(await getJson(withOffice('/presence', officeId)));
-        const wanted = new Set(employees.map((e) => e.toLowerCase()));
-        const counts: Record<string, number> = {};
-        const list: { id: string; status: string }[] = [];
-        for (const r of rows) {
-          const id = String(r.employee_id ?? '?');
-          if (wanted.size > 0 && !wanted.has(id.toLowerCase())) continue;
-          const s = pickStatus(r);
-          counts[s] = (counts[s] ?? 0) + 1;
-          list.push({ id, status: s });
-        }
-        if (cancelled) return;
-        if (list.length > 0) {
-          setState({ status: 'ready', data: { counts, list }, detail: null });
-        } else {
-          setState({ status: 'empty', data: null, detail: '/presence returned no rows for these employees' });
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setState({
-            status: 'unavailable',
-            data: null,
-            detail: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [employees, officeId]);
-
-  return (
-    <PanelShell title="Team Presence" endpoint="GET /presence">
-      {state.status === 'loading' && <SkeletonRows rows={3} height={44} />}
-      {state.status === 'ready' && state.data && (
-        <div className="table-wrap" style={{ border: 0 }}>
-          <table className="ledger">
-            <tbody>
-              {state.data.list.map((r) => (
-                <tr key={r.id}>
-                  <td className="id">{r.id}</td>
-                  <td style={{ textAlign: 'right' }}>
-                    <Chip tone={r.status.includes('active') && !r.status.includes('absent') ? 'ok' : r.status.includes('absent') ? 'bad' : 'idle'}>
-                      {r.status}
-                    </Chip>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {state.status === 'empty' && (
-        <EmptyState title="No presence data" body={state.detail ?? 'Nothing to aggregate for these employees.'} />
-      )}
-      {state.status === 'unavailable' && (
-        <ErrorNotice message={`Presence endpoint unavailable: ${state.detail}. This panel needs the /presence router.`} />
-      )}
-    </PanelShell>
-  );
+  return row;
 }
 
 // ---------------------------------------------------------------- view
 
+function presenceTone(status: string | null): 'ok' | 'warn' | 'bad' | 'idle' | null {
+  if (status === null) return null;
+  if (status.includes('active') && !status.includes('absent')) return 'ok';
+  if (status.includes('absent')) return 'bad';
+  if (status.includes('idle')) return 'warn';
+  return 'idle';
+}
+
 export default function TeamView({ officeId = "" }: { officeId?: string }) {
   const [draft, setDraft] = useState(DEFAULT_EMPLOYEES.join(', '));
   const [employees, setEmployees] = useState<string[]>(DEFAULT_EMPLOYEES);
+  const [rows, setRows] = useState<TeamRow[]>([]);
+  const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
   const apply = useCallback(() => {
     setEmployees(parseEmployees(draft));
     setRefreshKey((k) => k + 1);
   }, [draft]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (employees.length === 0) {
+        setRows([]);
+        return;
+      }
+      setLoading(true);
+      const results = await Promise.all(
+        employees.map((id) => loadTeamRow(id, officeId)),
+      );
+      if (!cancelled) {
+        setRows(results);
+        setLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [employees, officeId, refreshKey]);
+
+  // Summary aggregates computed from the same rows the table shows, so the
+  // totals and the per-person cells can never disagree.
+  const focusScores = rows.filter((r) => r.focus !== null).map((r) => r.focus as number);
+  const avgFocus = focusScores.length > 0
+    ? focusScores.reduce((a, b) => a + b, 0) / focusScores.length
+    : null;
+  const compliantCount = rows.filter((r) => r.breakCompliant === true).length;
+  const complianceTotal = rows.filter((r) => r.breakCompliant !== null).length;
+  const strainCounts = { green: 0, amber: 0, red: 0 };
+  for (const r of rows) {
+    if (r.strainLevel === 'green') strainCounts.green += 1;
+    if (r.strainLevel === 'amber') strainCounts.amber += 1;
+    if (r.strainLevel === 'red') strainCounts.red += 1;
+  }
+  const presentNow = rows.filter((r) => {
+    const tone = presenceTone(r.presence);
+    return tone === 'ok';
+  }).length;
+  const flagged = rows.filter(
+    (r) => r.strainLevel === 'red' || r.presenceAnomaly ||
+      (r.breakCompliant === false),
+  ).length;
+
+  const anyEndpointError = rows.some(
+    (r) => r.focusError || r.breakError || r.presenceError,
+  );
 
   return (
     <div className="rise">
@@ -531,18 +349,130 @@ export default function TeamView({ officeId = "" }: { officeId?: string }) {
             </div>
           </div>
           <p style={{ color: 'var(--text-2)', fontSize: 13, margin: 0 }}>
-            Defaults come from VITE_TEAM_EMPLOYEES. Each panel below is independent; if a
-            backend endpoint is missing, only that panel reports it.
+            Defaults come from VITE_TEAM_EMPLOYEES. Each cell loads from its own
+            endpoint; a missing endpoint shows a quiet dash, never a wrong number.
           </p>
         </section>
       </Reveal>
 
-      <div key={refreshKey}>
-        <Reveal><FocusPanel employees={employees} officeId={officeId} /></Reveal>
-        <Reveal><StrainPanel employees={employees} officeId={officeId} /></Reveal>
-        <Reveal><BreakCompliancePanel employees={employees} officeId={officeId} /></Reveal>
-        <Reveal><PresencePanel employees={employees} officeId={officeId} /></Reveal>
-      </div>
+      <Reveal>
+        <section className="panel" aria-label="Team summary">
+          <SectionHead title="Summary" meta={`${rows.length} people`} />
+          {loading && rows.length === 0 ? (
+            <SkeletonRows rows={1} height={64} />
+          ) : employees.length === 0 ? (
+            <EmptyState title="No employees selected" body="Enter employee IDs above and load the team to see aggregates." />
+          ) : (
+            <div className="grid-4">
+              <div className="stat">
+                <div className="stat-value mono" style={{ color: avgFocus !== null ? focusColor(avgFocus) : undefined }}>
+                  {avgFocus !== null ? avgFocus.toFixed(1) : '-'}
+                </div>
+                <div className="stat-label">Average focus</div>
+                <div className="stat-sub">{focusScores.length} of {rows.length} people have a score</div>
+              </div>
+              <div className="stat">
+                <div className="stat-value mono">
+                  {complianceTotal > 0 ? `${Math.round((100 * compliantCount) / complianceTotal)}%` : '-'}
+                </div>
+                <div className="stat-label">Break compliant</div>
+                <div className="stat-sub">{compliantCount} of {complianceTotal} measured</div>
+              </div>
+              <div className="stat">
+                <div className="stat-value mono" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Dot tone="ok" />{strainCounts.green}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Dot tone="warn" />{strainCounts.amber}</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Dot tone="bad" />{strainCounts.red}</span>
+                </div>
+                <div className="stat-label">Strain levels</div>
+                <div className="stat-sub">green, amber, red per person</div>
+              </div>
+              <div className="stat">
+                <div className="stat-value mono">{presentNow}</div>
+                <div className="stat-label">Present and active now</div>
+                <div className="stat-sub">{flagged} flagged for attention</div>
+              </div>
+            </div>
+          )}
+          <div style={{ marginTop: 14 }}>
+            {avgFocus !== null && (
+              <Meter value={avgFocus} color={focusColor(avgFocus)} label={`Team average focus ${avgFocus.toFixed(1)}`} />
+            )}
+          </div>
+        </section>
+      </Reveal>
+
+      <Reveal>
+        <section className="panel" aria-label="Per person">
+          <SectionHead title="Per person" meta="who, how much, any flags" />
+          {loading && rows.length === 0 ? (
+            <SkeletonRows rows={4} height={52} />
+          ) : employees.length === 0 ? (
+            <EmptyState title="No employees selected" body="Load a roster to see per-person focus, strain, break compliance and presence." />
+          ) : (
+            <>
+              {anyEndpointError && (
+                <div className="notice notice-warn" role="note">
+                  <p>
+                    Some endpoints did not answer for every person; those cells show a
+                    dash. The dashboard never substitutes an estimate for a missing value.
+                  </p>
+                </div>
+              )}
+              <div className="table-wrap">
+                <table className="ledger">
+                  <thead>
+                    <tr>
+                      <th>Employee</th>
+                      <th>Focus</th>
+                      <th>Strain</th>
+                      <th>Break compliance</th>
+                      <th>Presence now</th>
+                      <th>Flag</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => {
+                      const sTone = strainTone(r.strainLevel);
+                      const pTone = presenceTone(r.presence);
+                      const isFlagged =
+                        r.strainLevel === 'red' || r.presenceAnomaly || r.breakCompliant === false;
+                      return (
+                        <tr key={r.employee_id} className={isFlagged ? 'row-alert' : undefined}>
+                          <td className="id">{r.employee_id}</td>
+                          <td className="num" style={{ color: r.focus !== null ? focusColor(r.focus) : undefined }}>
+                            {r.focus !== null ? r.focus.toFixed(1) : '-'}
+                          </td>
+                          <td>
+                            {r.strainLevel === null
+                              ? '-'
+                              : <Chip tone={sTone ?? 'idle'}>{r.strainLevel}{r.strainHeuristic ? ' (heuristic)' : ''}</Chip>}
+                          </td>
+                          <td>
+                            {r.breakCompliant === null
+                              ? '-'
+                              : <Chip tone={r.breakCompliant ? 'ok' : 'warn'}>{r.breakCompliant ? 'compliant' : 'needs break'}</Chip>}
+                          </td>
+                          <td>
+                            {r.presence === null
+                              ? '-'
+                              : <Chip tone={pTone ?? 'idle'}>{r.presence}</Chip>}
+                          </td>
+                          <td>
+                            {isFlagged
+                              ? <Chip tone="bad">{r.presenceAnomaly ? 'presence anomaly' : r.strainLevel === 'red' ? 'high strain' : 'needs break'}</Chip>
+                              : '-'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </section>
+      </Reveal>
     </div>
   );
 }
