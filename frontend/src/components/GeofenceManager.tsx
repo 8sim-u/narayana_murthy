@@ -144,7 +144,7 @@ export default function GeofenceManager() {
     <section className="panel" aria-label="Geofence zones" style={{ marginTop: 20 }}>
       <SectionHead
         title="Geofence Zones"
-        meta="per-camera polygons · entry and exit alerts"
+        meta="draw on the map · crossings are employee-private"
       />
 
       {zoneError && <ErrorNotice message={zoneError} />}
@@ -245,7 +245,7 @@ export default function GeofenceManager() {
                 strokeLinejoin="round"
               />
               {zone.polygon[0] && (
-                <text x={clamp01(zone.polygon[0][0]) * MAP_W + 8} y={clamp01(zone.polygon[0][1]) * MAP_H - 8} fontSize="14" fill="var(--text-1)" fontWeight="600">
+                <text x={clamp01(zone.polygon[0][0]) * MAP_W + 8} y={clamp01(zone.polygon[0][1]) * MAP_H - 8} fontSize="14" fill="var(--ink)" fontWeight="600" fontFamily="var(--font-display)">
                   {zone.name}
                 </text>
               )}
@@ -275,7 +275,7 @@ export default function GeofenceManager() {
               <g key={`${position.camera_id}:${position.track_id}`}>
                 <title>{`${label} on ${position.camera_id}`}</title>
                 <circle cx={x} cy={y} r="9" fill={known ? 'var(--ice)' : 'var(--ink)'} fillOpacity={known ? 1 : 0.55} stroke="var(--paper)" strokeWidth="2" />
-                <text x={x} y={y + 25} textAnchor="middle" fontSize="13" fill="var(--text-1)">{label}</text>
+                <text x={x} y={y + 25} textAnchor="middle" fontSize="13" fill={known ? 'var(--ink)' : 'var(--text-2)'} fontFamily={known ? 'var(--font-display)' : 'var(--font-mono)'}>{label}</text>
               </g>
             );
           })}
@@ -287,36 +287,46 @@ export default function GeofenceManager() {
         </figcaption>
       </figure>
 
-      <div className="grid-2" style={{ marginTop: 16 }}>
-        <div>
-          <SectionHead title="Saved zones" meta={selectedZones.length} />
-          {loadingZones ? (
-            <p className="section-meta">Loading zones…</p>
-          ) : selectedZones.length === 0 ? (
-            <EmptyState title="No zones for this camera" body="Draw and save a polygon to start receiving entry and exit alerts." />
-          ) : (
-            <div style={{ display: 'grid', gap: 8 }}>
-              {selectedZones.map((zone) => (
-                <div key={zone.id} style={{ display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--rule)', padding: '8px 0' }}>
-                  <span style={{ flex: 1 }}>{zone.name}</span>
-                  <span className="section-meta">{zone.polygon.length} points</span>
-                  <button type="button" className="btn" onClick={() => { void removeZone(zone.id); }} aria-label={`Delete ${zone.name} geofence`}>
-                    Delete
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-        <div>
-          <SectionHead title="Personal history" meta="employee-only" />
-          <p className="section-meta">Geofence transitions are available only in an employee's token-authenticated personal view. This management page does not request or display person-level history.</p>
-        </div>
-      </div>
+      <section className="panel" aria-label="Saved zones" style={{ marginTop: 20, marginBottom: 18 }}>
+        <SectionHead title="Saved zones" meta={selectedCamera ? `${selectedZones.length} on ${selectedCamera}` : undefined} />
+        {loadingZones ? (
+          <p className="section-meta">Loading zones…</p>
+        ) : selectedZones.length === 0 ? (
+          <EmptyState title="No zones for this camera" body="Draw and save a polygon above to start collecting entry and exit crossings for this camera." />
+        ) : (
+          <div className="table-wrap">
+            <table className="ledger">
+              <thead>
+                <tr><th>Zone</th><th>Camera</th><th>Vertices</th><th>Actions</th></tr>
+              </thead>
+              <tbody>
+                {selectedZones.map((zone) => (
+                  <tr key={zone.id}>
+                    <td style={{ fontWeight: 600 }}>{zone.name}</td>
+                    <td className="id">{zone.camera_id}</td>
+                    <td className="num">{zone.polygon.length}</td>
+                    <td>
+                      <button type="button" className="btn" onClick={() => { void removeZone(zone.id); }} aria-label={`Delete ${zone.name} geofence`}>
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
 
-      <div className="notice notice-info" role="note" style={{ marginTop: 16 }}>
+      <div className="notice notice-info" role="note">
         <p>
-          Aggregate-only privacy-mode events remain unchanged. Transition records store no coordinates or tracker IDs, and temporary tracker state stays in memory and expires after 15 minutes. Legacy rows without a stored employee owner are hidden from personal history.
+          Entry and exit crossings name the zone, the direction and the time, but the
+          backend keeps them employee-private: each person sees their own history in
+          their token-authenticated personal view (Wellness tab). This management page
+          does not request or display person-level history. Transition records store no
+          coordinates or tracker IDs, and temporary tracker state stays in memory and
+          expires after 15 minutes. Legacy rows without a stored employee owner are
+          hidden from personal history.
         </p>
       </div>
     </section>
