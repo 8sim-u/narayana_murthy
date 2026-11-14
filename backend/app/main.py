@@ -24,11 +24,13 @@ from app.schemas import EventCreate, EventDetail, EventResponse
 # The model imports must run before init_db() so Base.metadata.create_all
 # creates the new tables.
 from app import activity_models  # noqa: F401 - registers ActivityLog
+from app import geofence_models  # noqa: F401 - registers GeofenceZone
 from app import security_models  # noqa: F401 - registers SecurityEvent
 from app.activity import router as activity_router
 from app.edge import ensure_schema, record_identity_sighting, record_position
 from app.edge import router as edge_router
 from app.focus import router as focus_router
+from app.geofence import router as geofence_router
 from app.presence import router as presence_router
 from app.security import router as security_router
 from app.policy import router as policy_router
@@ -105,6 +107,7 @@ app.add_middleware(
 app.include_router(activity_router)
 app.include_router(edge_router)
 app.include_router(focus_router)
+app.include_router(geofence_router)
 app.include_router(presence_router)
 app.include_router(security_router)
 app.include_router(policy_router)

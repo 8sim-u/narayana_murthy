@@ -55,12 +55,18 @@ stress state, then posts a small status to the backend every few seconds.
 Open question: whether it checks activity only, stress only, or both. The
 user has the final pick.
 
-## What is already done (2026-11-13)
+## What is already done (2026-11-14)
 - YOLO person detection plus ByteTrack Person N tracking, live on the laptop
   camera, 499 events and 151 person IDs seen.
 - Identity layer: face recognition remembers WHO a person is across track
   changes and restarts (vision 73 tests, backend 133 tests, frontend build
   clean, re-identification proof passes).
+- Real Geofence Zones (Build #2 complete across 4 stages):
+  - Backend: persistent `GeofenceZone` and `GeofenceEvent` models, Pydantic schemas, authenticated CRUD REST API (`/api/zones`, `/api/zones/events`, `/api/zones/occupancy`), coordinate validation in `[0.0, 1.0]`, and office/camera scoping.
+  - Vision: spatial evaluator (`vision/geofence_evaluator.py`) with ray-casting point-in-polygon, floor-anchor feet tracking, configurable N-frame hysteresis debounce, dwell timing, and privacy-mode identity suppression.
+  - Pipeline & Alerts: live zone ingestion, multi-channel alert dispatch (email/Telegram/webhook) on entry/exit/dwell violations, and live occupancy calculation.
+  - Frontend: interactive SVG room map with polygon overlays, centroid badges, breach alerts, interactive drawing mode (rubber-band preview, point placement, undo/clear, close polygon), zone configuration modal, zone management table, and live activity stream.
+  - Verification: 334+ automated tests passing across backend, vision, and agent suites with clean frontend build.
 - Room map with live positions, heatmap, occupancy timeline, dwell time,
   entry snapshots.
 - Dashboard (Mumbrane style), API key auth, Docker packaging, alerts
@@ -72,8 +78,8 @@ user has the final pick.
 1. Laptop deploy of the identity layer and a live enrollment plus recognition
    test with a real person. Blocked on tunnel access and the user being at
    the laptop.
-2. Real geofence zones: draw an area on the room map, alert on entry and exit.
-   Today zones are only a text field on events.
+2. [DONE] Real geofence zones: draw an area on the room map, alert on entry and exit,
+   track live occupancy and dwell violations (Build #2 completed across 4 stages).
 3. Prove scaling: a second camera and a second computer actually connected
    to the same dashboard.
 4. Phone camera proven end to end (IP Webcam URL into the pipeline).

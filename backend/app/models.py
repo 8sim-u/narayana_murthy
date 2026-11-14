@@ -80,3 +80,9 @@ class FaceRecord(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+# Re-export Geofence models so they are accessible from app.models
+from app.geofence_models import GeofenceEvent, GeofenceZone  # noqa: E402, F401
+
+

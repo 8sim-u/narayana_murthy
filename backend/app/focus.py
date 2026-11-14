@@ -308,7 +308,7 @@ def _count_streak(db: Session, employee_id: str, predicate) -> int:
     returns True. If today has no data yet, the streak starts from yesterday.
     """
     streak = 0
-    day = date.today()
+    day = datetime.now(timezone.utc).date()
     value = predicate(db, employee_id, day)
     if value is None:
         day = day - timedelta(days=1)
@@ -352,7 +352,7 @@ def get_daily_focus(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Activity module not available; focus scores cannot be computed",
         )
-    day = date_ or date.today()
+    day = date_ or datetime.now(timezone.utc).date()
     try:
         return daily_focus(db, employee_id, day, office_id)
     except SQLAlchemyError as exc:

@@ -778,6 +778,107 @@ tr.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
 .alert-row-meta .id { font-family: var(--font-mono); }
 
 /* ==========================================================================
+   Geofence Zones & Modal Dialogs
+   ========================================================================== */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 12, 13, 0.45);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.modal-sheet {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  width: 100%;
+  max-width: 540px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.16);
+  padding: 24px;
+}
+
+.modal-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 4px;
+  color: var(--ink);
+}
+
+.modal-sub {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 0 0 16px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.draw-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: var(--ice-soft);
+  border: 1px solid #c3d8f5;
+  color: var(--ice-ink);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.color-presets {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.color-chip-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--paper);
+  outline: 1px solid var(--rule);
+  cursor: pointer;
+  padding: 0;
+  transition: transform var(--duration-micro) ease;
+}
+
+.color-chip-btn:hover {
+  transform: scale(1.18);
+}
+
+.color-chip-btn.active {
+  outline: 2px solid var(--ink);
+  transform: scale(1.15);
+}
+
+.pulse-indicator {
+  animation: pulse-ring 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.35); opacity: 0.2; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+/* ==========================================================================
    Reduced motion: everything collapses to static
    ========================================================================== */
 
@@ -788,6 +889,7 @@ tr.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
   .skel { animation: none; opacity: 0.7; }
   .loadbar > i { animation: none; width: 100%; transform: none; }
   .signal-dot::after { animation: none; opacity: 0.3; }
+  .pulse-indicator { animation: none; }
   .reveal { opacity: 1; transform: none; transition: none; }
   .tabnav-item::after { transition: none; }
   .station-card:hover { transform: none; }

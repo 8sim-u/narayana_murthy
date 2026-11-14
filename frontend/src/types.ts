@@ -97,3 +97,88 @@ export interface UnknownSighting {
   timestamp?: string | null;
   last_seen?: string | null;
 }
+
+// --------------------------- Geofence Zones --------------------------------
+
+export type ZoneType = 'restricted' | 'workstation' | 'entry_exit' | 'custom';
+
+export interface GeofenceZone {
+  id: number;
+  office_id: string;
+  camera_id: string | null;
+  name: string;
+  zone_type: ZoneType;
+  polygon: [number, number][];
+  color: string;
+  alert_on_enter: boolean;
+  alert_on_exit: boolean;
+  dwell_threshold_seconds: number | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GeofenceZoneCreate {
+  name: string;
+  office_id?: string;
+  camera_id?: string | null;
+  zone_type?: ZoneType;
+  polygon: [number, number][];
+  color?: string;
+  alert_on_enter?: boolean;
+  alert_on_exit?: boolean;
+  dwell_threshold_seconds?: number | null;
+  is_active?: boolean;
+}
+
+export interface GeofenceZoneUpdate {
+  name?: string;
+  office_id?: string;
+  camera_id?: string | null;
+  zone_type?: ZoneType;
+  polygon?: [number, number][];
+  color?: string;
+  alert_on_enter?: boolean;
+  alert_on_exit?: boolean;
+  dwell_threshold_seconds?: number | null;
+  is_active?: boolean;
+}
+
+export type TransitionType = 'ZONE_ENTER' | 'ZONE_EXIT' | 'DWELL_EXCEEDED';
+
+export interface GeofenceEventRecord {
+  id: number;
+  zone_id: number;
+  zone_name: string;
+  zone_type: string;
+  office_id: string;
+  camera_id: string | null;
+  transition_type: TransitionType;
+  track_id: number;
+  person_label: string;
+  identity_id: string | null;
+  identity_name: string | null;
+  dwell_seconds: number | null;
+  alert_triggered: boolean;
+  timestamp: string;
+  created_at?: string;
+}
+
+export interface ZoneOccupant {
+  track_id: number;
+  person_label: string;
+  entered_at: string;
+  dwell_seconds?: number | null;
+  identity_name?: string | null;
+}
+
+export interface ZoneOccupancy {
+  zone_id: number;
+  zone_name: string;
+  zone_type: string;
+  color: string;
+  current_count: number;
+  occupants: ZoneOccupant[];
+  recent_alerts_count: number;
+}
+

@@ -55,6 +55,9 @@ ALERT_TITLES = {
     "usb_remove": "USB device removed",
     "file_write_burst": "Large file write burst",
     "after_hours_activity": "After-hours activity",
+    "GEOFENCE_ZONE_ENTER": "Geofence Zone Entered",
+    "GEOFENCE_ZONE_EXIT": "Geofence Zone Exited",
+    "GEOFENCE_DWELL_EXCEEDED": "Geofence Dwell Threshold Exceeded",
 }
 
 
@@ -62,8 +65,9 @@ def format_alert_text(kind: str, payload: dict) -> str:
     """Human-readable one-screen summary of the alert."""
     title = ALERT_TITLES.get(kind, kind.replace("_", " ").title())
     lines = [f"[WAMSS] {title}"]
-    for key in ("employee_id", "machine_id", "severity", "reason", "detail",
-                "strain_score", "peak_score", "streak", "timestamp"):
+    for key in ("zone_name", "transition_type", "person_label", "dwell_seconds",
+                "camera_id", "office_id", "employee_id", "machine_id", "severity",
+                "reason", "detail", "strain_score", "peak_score", "streak", "timestamp"):
         value = payload.get(key)
         if value in (None, "", {}):
             continue

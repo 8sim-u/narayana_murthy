@@ -3,12 +3,17 @@ import type {
   DetectionEvent,
   EventCreate,
   EventResponse,
+  GeofenceEventRecord,
+  GeofenceZone,
+  GeofenceZoneCreate,
+  GeofenceZoneUpdate,
   HealthStatus,
   HeatPoint,
   Identity,
   OccupancyBucket,
   PersonPosition,
   UnknownSighting,
+  ZoneOccupancy,
 } from './types';
 
 // Same-origin by default: the dashboard calls the relative path /api/*,
@@ -127,3 +132,85 @@ export async function deleteIdentity(name: string): Promise<unknown> {
   });
   return handleResponse<unknown>(res);
 }
+
+// --------------------------- Geofence Zones API ----------------------------
+
+export async function getGeofenceZones(
+  officeId?: string,
+  cameraId?: string,
+  isActive?: boolean,
+  zoneType?: string,
+): Promise<GeofenceZone[]> {
+  const params = new URLSearchParams();
+  if (officeId) params.set('office_id', officeId);
+  if (cameraId) params.set('camera_id', cameraId);
+  if (isActive !== undefined) params.set('is_active', String(isActive));
+  if (zoneType) params.set('zone_type', zoneType);
+  const q = params.toString();
+  return fetchOptionalList<GeofenceZone>(`/zones${q ? `?${q}` : ''}`, []);
+}
+
+export async function getGeofenceZone(id: number): Promise<GeofenceZone> {
+  const res = await fetch(`${API_URL}/zones/${id}`);
+  return handleResponse<GeofenceZone>(res);
+}
+
+export async function createGeofenceZone(zone: GeofenceZoneCreate): Promise<GeofenceZone> {
+  const res = await fetch(`${API_URL}/zones`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(zone),
+  });
+  return handleResponse<GeofenceZone>(res);
+}
+
+export async function updateGeofenceZone(
+  id: number,
+  patch: GeofenceZoneUpdate,
+): Promise<GeofenceZone> {
+  const res = await fetch(`${API_URL}/zones/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  return handleResponse<GeofenceZone>(res);
+}
+
+export async function deleteGeofenceZone(id: number): Promise<{ id: number; status: string }> {
+  const res = await fetch(`${API_URL}/zones/${id}`, {
+    method: 'DELETE',
+  });
+  return handleResponse<{ id: number; status: string }>(res);
+}
+
+export async function getZoneOccupancy(
+  officeId?: string,
+  cameraId?: string,
+): Promise<ZoneOccupancy[]> {
+  const params = new URLSearchParams();
+  if (officeId) params.set('office_id', officeId);
+  if (cameraId) params.set('camera_id', cameraId);
+  const q = params.toString();
+  return fetchOptionalList<ZoneOccupancy>(`/zones/occupancy${q ? `?${q}` : ''}`, []);
+}
+
+export async function getGeofenceEvents(filters?: {
+  office_id?: string;
+  zone_id?: number;
+  camera_id?: string;
+  transition_type?: string;
+  alert_triggered?: boolean;
+  limit?: number;
+}): Promise<GeofenceEventRecord[]> {
+  const params = new URLSearchParams();
+  if (filters?.office_id) params.set('office_id', filters.office_id);
+  if (filters?.zone_id !== undefined) params.set('zone_id', String(filters.zone_id));
+  if (filters?.camera_id) params.set('camera_id', filters.camera_id);
+  if (filters?.transition_type) params.set('transition_type', filters.transition_type);
+  if (filters?.alert_triggered !== undefined)
+    params.set('alert_triggered', String(filters.alert_triggered));
+  if (filters?.limit) params.set('limit', String(filters.limit));
+  const q = params.toString();
+  return fetchOptionalList<GeofenceEventRecord>(`/zones/events${q ? `?${q}` : ''}`, []);
+}
+

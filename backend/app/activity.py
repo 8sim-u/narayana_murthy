@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -87,8 +87,7 @@ class ActivityRecordOut(BaseModel):
     strain_level: Optional[str] = None  # computed server-side from strain_score
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ActivityIngestResponse(BaseModel):

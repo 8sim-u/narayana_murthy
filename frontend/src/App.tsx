@@ -188,7 +188,7 @@ export default function App() {
           {tab === 'policy' && <PolicyView />}
           {tab === 'team' && <TeamView officeId={officeId} />}
           {tab === 'analytics' && <AnalyticsTab />}
-          {tab === 'roommap' && <RoomMapTab />}
+          {tab === 'roommap' && <RoomMapTab officeId={officeId} />}
         </div>
 
         <footer className="footer-note">

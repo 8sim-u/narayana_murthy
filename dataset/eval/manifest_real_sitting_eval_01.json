@@ -1,0 +1,80 @@
+{
+  "session_id": "real_sitting_eval_01",
+  "camera_id": "CAM_01",
+  "split": "eval",
+  "stream_url": "http://127.0.0.1:8080/video",
+  "start_iso": "2026-11-06T20:17:26.899798+00:00",
+  "end_iso": "2026-11-06T20:17:51.534535+00:00",
+  "duration_seconds": 24.63,
+  "interval_seconds": 1.0,
+  "frames_saved": 5,
+  "duplicates_skipped": 20,
+  "scenario_description": "seated workstation person in front of MacBook webcam",
+  "frames": [
+    {
+      "frame_index": 1,
+      "filename": "CAM_01_real_sitting_eval_01_0001.jpg",
+      "image_path": "eval/images/CAM_01_real_sitting_eval_01_0001.jpg",
+      "label_path": "eval/labels/CAM_01_real_sitting_eval_01_0001.txt",
+      "timestamp": 1793996246.8998,
+      "iso_timestamp": "2026-11-06T20:17:26.901852+00:00",
+      "width": 640,
+      "height": 360,
+      "channels": 3,
+      "motion_score": 1.0,
+      "sha256": "d41bf3f36d164310c2a2684f2610e4fbd634ae725184739abd5668ab83a94f55"
+    },
+    {
+      "frame_index": 2,
+      "filename": "CAM_01_real_sitting_eval_01_0002.jpg",
+      "image_path": "eval/images/CAM_01_real_sitting_eval_01_0002.jpg",
+      "label_path": "eval/labels/CAM_01_real_sitting_eval_01_0002.txt",
+      "timestamp": 1793996259.2017,
+      "iso_timestamp": "2026-11-06T20:17:39.265642+00:00",
+      "width": 640,
+      "height": 360,
+      "channels": 3,
+      "motion_score": 0.0153,
+      "sha256": "64d769a003538109dc3026ca0d9be13da962bcf6aa881e880a8f6a6f97aa7c3b"
+    },
+    {
+      "frame_index": 3,
+      "filename": "CAM_01_real_sitting_eval_01_0003.jpg",
+      "image_path": "eval/images/CAM_01_real_sitting_eval_01_0003.jpg",
+      "label_path": "eval/labels/CAM_01_real_sitting_eval_01_0003.txt",
+      "timestamp": 1793996262.2727,
+      "iso_timestamp": "2026-11-06T20:17:42.331802+00:00",
+      "width": 640,
+      "height": 360,
+      "channels": 3,
+      "motion_score": 0.0385,
+      "sha256": "f713b7a8ab627f6957bd7b133a26de2f523993796a6d06d716260a8e0161a86b"
+    },
+    {
+      "frame_index": 4,
+      "filename": "CAM_01_real_sitting_eval_01_0004.jpg",
+      "image_path": "eval/images/CAM_01_real_sitting_eval_01_0004.jpg",
+      "label_path": "eval/labels/CAM_01_real_sitting_eval_01_0004.txt",
+      "timestamp": 1793996263.2973,
+      "iso_timestamp": "2026-11-06T20:17:43.352395+00:00",
+      "width": 640,
+      "height": 360,
+      "channels": 3,
+      "motion_score": 0.0331,
+      "sha256": "dcb3f16f37708df43f4517835d5e1f3222fdfcd3640437f0d5fc35dfd3411a90"
+    },
+    {
+      "frame_index": 5,
+      "filename": "CAM_01_real_sitting_eval_01_0005.jpg",
+      "image_path": "eval/images/CAM_01_real_sitting_eval_01_0005.jpg",
+      "label_path": "eval/labels/CAM_01_real_sitting_eval_01_0005.txt",
+      "timestamp": 1793996271.4741,
+      "iso_timestamp": "2026-11-06T20:17:51.534199+00:00",
+      "width": 640,
+      "height": 360,
+      "channels": 3,
+      "motion_score": 0.0351,
+      "sha256": "3cf5aca27fb53ea4fb18f9731d2aa87dbf5cf350ee4d60a257c86a401093a006"
+    }
+  ]
+}

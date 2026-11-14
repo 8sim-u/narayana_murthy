@@ -11,6 +11,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 import requests
 import cv2
@@ -24,6 +25,25 @@ try:
     import mediapipe as mp
 except ImportError:
     mp = None
+
+try:
+    from vision.geofence_evaluator import (
+        GeofenceEvaluator,
+        ZoneConfig,
+        extract_floor_anchor,
+    )
+except ImportError:
+    try:
+        from geofence_evaluator import (  # type: ignore
+            GeofenceEvaluator,
+            ZoneConfig,
+            extract_floor_anchor,
+        )
+    except ImportError:
+        GeofenceEvaluator = None
+        ZoneConfig = None
+        extract_floor_anchor = None
+
 
 
 def _parse_bool(value, default):
@@ -583,6 +603,100 @@ def _build_gallery_refresher():
                             _face_id, privacy_mode=PRIVACY_MODE)
 
 
+# Seconds between geofence zone sync polls from backend /api/zones. 0 disables polling.
+GEOFENCE_POLL_SECONDS = _parse_float(
+    os.environ.get("WAMSS_GEOFENCE_POLL_SECONDS"), 30.0)
+
+
+class ZoneRefresher:
+    """Poll backend /api/zones and sync active zones to the GeofenceEvaluator."""
+
+    def __init__(self, base_url, poll_seconds, evaluator, camera_id=None,
+                 http_get=None, headers_fn=None):
+        self.base_url = (base_url or "").rstrip("/")
+        self.poll_seconds = float(poll_seconds)
+        self.evaluator = evaluator
+        self.camera_id = camera_id
+        self._http_get = http_get or requests.get
+        self._headers_fn = headers_fn or _backend_headers
+        self.last_poll_time = 0.0
+
+    def maybe_refresh(self, now):
+        if self.poll_seconds <= 0 or not self.base_url or self.evaluator is None:
+            return False
+        if now - self.last_poll_time < self.poll_seconds:
+            return False
+        self.last_poll_time = now
+        try:
+            url = f"{self.base_url}/api/zones"
+            params = {"is_active": "true"}
+            if self.camera_id:
+                params["camera_id"] = self.camera_id
+            resp = self._http_get(url, params=params, headers=self._headers_fn(), timeout=3.0)
+            if resp.status_code == 200:
+                raw_zones = resp.json()
+                if isinstance(raw_zones, list) and ZoneConfig is not None:
+                    configs = [ZoneConfig.from_dict(z) for z in raw_zones]
+                    self.evaluator.update_zones(configs)
+                    return True
+        except Exception as exc:
+            print(f"[geofence] WARNING: could not refresh zones: {exc}")
+        return False
+
+
+def _build_geofence_evaluator(camera_id, zones=None, privacy_mode=False):
+    """Build a GeofenceEvaluator instance or None if module unavailable."""
+    if GeofenceEvaluator is None:
+        return None
+    return GeofenceEvaluator(
+        zones=zones or [],
+        camera_id=camera_id,
+        privacy_mode=privacy_mode or PRIVACY_MODE,
+    )
+
+
+def _post_geofence_events(events, backend_events_url, headers=None, http_post=None):
+    """
+    Safely post geofence transition events to backend /api/zones/events.
+    Catches and logs any network or request failures so camera loop is never interrupted.
+    """
+    if not events or not backend_events_url:
+        return False
+    poster = http_post or requests.post
+    payload = []
+    for ev in events:
+        tid_int = int(ev.track_id) if str(ev.track_id).isdigit() else 0
+        iso_ts = None
+        if ev.timestamp:
+            iso_ts = datetime.fromtimestamp(ev.timestamp, tz=timezone.utc).isoformat()
+
+        payload.append({
+            "zone_id": int(ev.zone_id),
+            "transition_type": str(ev.event_type),
+            "track_id": tid_int,
+            "zone_name": str(ev.zone_name),
+            "zone_type": str(ev.zone_type),
+            "camera_id": ev.camera_id,
+            "person_label": str(ev.person_label),
+            "identity_name": ev.identity_name,
+            "identity_id": ev.identity_id,
+            "dwell_seconds": float(ev.dwell_seconds),
+            "alert_triggered": bool(ev.alert_triggered),
+            "timestamp": iso_ts,
+        })
+    try:
+        req_headers = headers if headers is not None else _backend_headers()
+        resp = poster(backend_events_url, json=payload, headers=req_headers, timeout=3.0)
+        if hasattr(resp, "raise_for_status"):
+            resp.raise_for_status()
+        return True
+    except Exception as exc:
+        print(f"[geofence] WARNING: failed to POST geofence events: {exc}")
+        return False
+
+
+
+
 def _build_person_event(camera_id, track_key, person_name, name_confidence,
                         position_x, position_y, snapshot_path,
                         dwell_seconds, max_confidence):
@@ -748,6 +862,16 @@ def run_camera(camera_id, stream_url):
     # (run_camera_privacy is a separate loop that never touches it).
     gallery_refresher = _build_gallery_refresher()
 
+    # Geofence spatial evaluator (Build #2: Real Geofence Zones)
+    geofence_evaluator = _build_geofence_evaluator(camera_id, privacy_mode=PRIVACY_MODE)
+    geofence_base_url = GALLERY_BASE_URL or _gallery_base_from_backend()
+    geofence_events_url = f"{geofence_base_url}/api/zones/events" if geofence_base_url else ""
+    geofence_refresher = (
+        ZoneRefresher(geofence_base_url, GEOFENCE_POLL_SECONDS, geofence_evaluator, camera_id=camera_id)
+        if (geofence_evaluator is not None and geofence_base_url and GEOFENCE_POLL_SECONDS > 0)
+        else None
+    )
+
     if not cap.isOpened():
         print(f"[{camera_id}] ERROR: Cannot open camera stream")
         return
@@ -782,6 +906,9 @@ def run_camera(camera_id, stream_url):
             if gallery_refresher is not None:
                 gallery_refresher.maybe_refresh(now)
 
+            if geofence_refresher is not None:
+                geofence_refresher.maybe_refresh(now)
+
             person_count = len(boxes) if boxes is not None else 0
 
             # Per-frame per-track bookkeeping: first-seen timestamps for
@@ -801,6 +928,26 @@ def run_camera(camera_id, stream_url):
                     if identity is not None:
                         identity.observe(track_key, frame, tbox,
                                          frame_no, now)
+                    if geofence_evaluator is not None:
+                        p_name, _ = identity.identity(track_key) if identity is not None else (None, None)
+                        gf_events = geofence_evaluator.evaluate(
+                            track_id=str(int(tid)),
+                            position_or_bbox=tbox,
+                            timestamp=now,
+                            identity_name=p_name,
+                            frame_w=frame.shape[1] if len(frame.shape) > 1 else None,
+                            frame_h=frame.shape[0] if len(frame.shape) > 0 else None,
+                        )
+                        for gf_ev in gf_events:
+                            print(
+                                f"[{camera_id}] GEOFENCE {gf_ev.event_type} | "
+                                f"Zone: {gf_ev.zone_name} | "
+                                f"Track: {gf_ev.person_label} | "
+                                f"Dwell: {gf_ev.dwell_seconds:.1f}s | "
+                                f"Alert: {gf_ev.alert_triggered}"
+                            )
+                        if gf_events and geofence_events_url:
+                            _post_geofence_events(gf_events, geofence_events_url)
 
             # Send one event per tracked person when the interval allows.
             # Previously only the first box was reported; every person in

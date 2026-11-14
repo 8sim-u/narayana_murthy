@@ -47,3 +47,19 @@ class EventDetail(BaseModel):
     dwell_seconds: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Re-export Geofence schemas
+from app.geofence_schemas import (  # noqa: E402, F401
+    GeofenceEventCreate,
+    GeofenceEventOut,
+    GeofenceZoneCreate,
+    GeofenceZoneOut,
+    GeofenceZoneUpdate,
+    TransitionType,
+    ZoneOccupancyOut,
+    ZoneOccupant,
+    ZoneType,
+)
+
+
