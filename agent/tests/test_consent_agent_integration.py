@@ -72,10 +72,14 @@ def test_windows_service_calls_shared_consent_gate_before_sync(monkeypatch):
     servicemanager = types.ModuleType("servicemanager")
     servicemanager.LogInfoMsg = lambda *args: None
     servicemanager.LogErrorMsg = lambda *args: None
+    win32security = types.ModuleType("win32security")
+    win32security.LookupAccountName = lambda *args: ("", "", 0)
+    win32security.ConvertSidToStringSid = lambda sid: "S-1-5-21-FAKE-1001"
     monkeypatch.setitem(sys.modules, "win32event", win32event)
     monkeypatch.setitem(sys.modules, "win32service", win32service)
     monkeypatch.setitem(sys.modules, "win32serviceutil", win32serviceutil)
     monkeypatch.setitem(sys.modules, "servicemanager", servicemanager)
+    monkeypatch.setitem(sys.modules, "win32security", win32security)
 
     import activity_agent
 
@@ -95,7 +99,7 @@ def test_windows_service_calls_shared_consent_gate_before_sync(monkeypatch):
             spool_paths.append(path)
 
     class FakeSyncer:
-        def __init__(self, spool):
+        def __init__(self, spool, os_user=None):
             syncers.append(self)
             self.sync_calls = 0
 
@@ -108,6 +112,12 @@ def test_windows_service_calls_shared_consent_gate_before_sync(monkeypatch):
     service_module = importlib.import_module("windows_sync_service")
     monkeypatch.setattr(service_module, "_load_config", lambda: None)
 
+    # The service only syncs for the bound interactive account, so bind the
+    # test identity before each run (the stubbed SID lookup returns the fake SID).
+    monkeypatch.setenv("WAMSS_INTERACTIVE_USER", "alice")
+    monkeypatch.setenv("WAMSS_INTERACTIVE_SID", "S-1-5-21-FAKE-1001")
+    monkeypatch.setenv("WAMSS_EMPLOYEE_ID", "E-1")
+
     service = service_module.WorkstationSyncService([])
     service._sync_until_stopped()
 
@@ -117,6 +127,7 @@ def test_windows_service_calls_shared_consent_gate_before_sync(monkeypatch):
 
     consent_stub.current_os_user = lambda: "bob"
     consent_stub.is_consented = lambda **kwargs: gate_calls.append(kwargs) or True
+    monkeypatch.setenv("WAMSS_INTERACTIVE_USER", "bob")
     monkeypatch.setattr(
         activity_agent, "spool_dir_for_identity",
         lambda os_user=None, employee_id=None: f"/spool/{os_user}/{employee_id}",
