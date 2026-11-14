@@ -180,12 +180,13 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
 
   const idleAlerts = useMemo(() => {
     const now = Date.now();
-    return strain.filter((s) => {
+    // Uses the deduped per-machine list so a machine is named once.
+    return latestStrain.filter((s) => {
       if (!s.is_idle || !s.last_seen) return false;
       const idleMin = (now - new Date(s.last_seen).getTime()) / 60000;
       return idleMin >= idleThresholdMin;
     });
-  }, [strain, idleThresholdMin]);
+  }, [latestStrain, idleThresholdMin]);
 
   const alerts = useMemo(
     () =>
