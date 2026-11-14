@@ -32,7 +32,7 @@ const sourceLabel: Record<RmssdSource, string> = { manual: 'Manual entry (source
 const API = getApiUrl();
 const localToday = (zone = 'UTC') => new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const attendanceSourceLabel: Record<string, string> = { camera: 'Camera sightings', computer: 'Active computer activity' };
-const formatAttendanceTime = (timestamp: string | null) => timestamp ? new Intl.DateTimeFormat(undefined, { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp)) : '—';
+const formatAttendanceTime = (timestamp: string | null) => timestamp ? new Intl.DateTimeFormat(undefined, { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp)) : '-';
 const formatAttendanceMinutes = (minutes: number) => minutes.toLocaleString(undefined, { maximumFractionDigits: 2 });
 
 async function request<T>(token: string, path: string, body?: unknown): Promise<T> {
@@ -208,7 +208,7 @@ export default function WellnessDashboard() {
   };
 
   const dailyRows = useMemo(() => [...(data?.wellness.daily ?? [])].reverse(), [data]);
-  const latestReadiness = dailyRows.find((row) => row.readiness !== null)?.readiness ?? '—';
+  const latestReadiness = dailyRows.find((row) => row.readiness !== null)?.readiness ?? '-';
   const beginBreathing = async () => {
     try {
       const result = await request<{ session_id: string; duration_seconds: number }>(token, '/wellness/breathing/start', {});
@@ -289,8 +289,8 @@ export default function WellnessDashboard() {
       <section className="panel">
         <div className="section-head"><h2 className="section-title">Workday reflection</h2><span className="section-meta">Recent 28 days · activity totals only</span></div>
         <div className="grid-3">
-          <div className="stat"><div className="stat-value mono">{todayActivity ? Math.round(todayActivity.focus_minutes) : '—'}</div><div className="stat-label">Active minutes today</div></div>
-          <div className="stat"><div className="stat-value mono">{todayActivity?.tasks_completed ?? '—'}</div><div className="stat-label">Tasks you reported today</div></div>
+          <div className="stat"><div className="stat-value mono">{todayActivity ? Math.round(todayActivity.focus_minutes) : '-'}</div><div className="stat-label">Active minutes today</div></div>
+          <div className="stat"><div className="stat-value mono">{todayActivity?.tasks_completed ?? '-'}</div><div className="stat-label">Tasks you reported today</div></div>
           <div className="stat"><div className="stat-value mono">{data.false_positive_reports}</div><div className="stat-label">False-positive reports</div></div>
         </div>
         <form className="wellness-connect" onSubmit={(e) => { e.preventDefault(); if (taskCount !== '') void mutate('/wellness/tasks', { day: localToday(data?.day_timezone ?? 'UTC'), tasks_completed: Number(taskCount) }, 'Your task-count self-report was saved.'); }}>
@@ -298,7 +298,7 @@ export default function WellnessDashboard() {
           <button className="btn" type="submit" disabled={taskCount === ''}>Save my count</button>
         </form>
         <div className="table-wrap"><table className="ledger"><thead><tr><th>Day</th><th>Active minutes</th><th>Your task count</th></tr></thead><tbody>
-          {[...(data.activity ?? [])].slice(-7).reverse().map((d) => <tr key={d.day}><td>{d.day}</td><td>{Math.round(d.focus_minutes)}</td><td>{d.tasks_completed ?? '—'}</td></tr>)}
+          {[...(data.activity ?? [])].slice(-7).reverse().map((d) => <tr key={d.day}><td>{d.day}</td><td>{Math.round(d.focus_minutes)}</td><td>{d.tasks_completed ?? '-'}</td></tr>)}
         </tbody></table></div>
       </section>
 
@@ -352,8 +352,8 @@ export default function WellnessDashboard() {
           <button type="button" className="btn btn-primary" onClick={() => void mutate('/wellness/consent', { accepted: true }, 'Optional wellness consent enabled. You can withdraw it here at any time.')}>I choose to opt in</button>
         </div> : <>
           <div className="grid-3">
-            <div className="stat"><div className="stat-value mono">{data.wellness.live?.heart_rate_bpm ?? '—'}</div><div className="stat-label">Live heart rate · {liveTime}</div></div>
-            <div className="stat"><div className="stat-value mono">{data.wellness.live?.rmssd_ms ?? '—'}</div><div className="stat-label">Live RMSSD (ms)</div></div>
+            <div className="stat"><div className="stat-value mono">{data.wellness.live?.heart_rate_bpm ?? '-'}</div><div className="stat-label">Live heart rate · {liveTime}</div></div>
+            <div className="stat"><div className="stat-value mono">{data.wellness.live?.rmssd_ms ?? '-'}</div><div className="stat-label">Live RMSSD (ms)</div></div>
             <div className="stat"><div className="stat-value mono">{latestReadiness}</div><div className="stat-label">Latest morning advisory readiness / 100</div></div>
           </div>
           <p className="wellness-privacy-note">Morning readiness is optional, non-clinical guidance using recorded sleep and available personal HRV/resting-HR comparisons; missing measurements are omitted, never inferred. It is private to you, not an employment score, must never be used to penalize employees, and is never shown to managers.</p>
@@ -401,7 +401,7 @@ export default function WellnessDashboard() {
           </div>
           {sessionMessage && <p className="notice" role="status">{sessionMessage}</p>}
           <div className="table-wrap"><table className="ledger"><thead><tr><th>Morning</th><th>RMSSD (source)</th><th>Resting HR</th><th>Sleep session minutes</th><th>Morning advisory readiness</th></tr></thead><tbody>
-            {dailyRows.slice(0, 7).map((d) => <tr key={d.day}><td>{d.day}</td><td>{d.rmssd_ms == null ? '—' : <>{d.rmssd_ms} · {sourceLabel[d.rmssd_source ?? 'manual']}</>}</td><td>{d.resting_hr_bpm ?? '—'}</td><td>{d.sleep_minutes ?? '—'}</td><td>{d.readiness ?? '—'}</td></tr>)}
+            {dailyRows.slice(0, 7).map((d) => <tr key={d.day}><td>{d.day}</td><td>{d.rmssd_ms == null ? '-' : <>{d.rmssd_ms} · {sourceLabel[d.rmssd_source ?? 'manual']}</>}</td><td>{d.resting_hr_bpm ?? '-'}</td><td>{d.sleep_minutes ?? '-'}</td><td>{d.readiness ?? '-'}</td></tr>)}
           </tbody></table></div>
           <button type="button" className="btn btn-danger" onClick={() => { if (window.confirm('Withdraw optional wellness consent and permanently delete your stored wellness summaries, breathing-session measurements, and break markers?')) void mutate('/wellness/consent', { accepted: false }, 'Wellness consent withdrawn and health history deleted.'); }}>Withdraw and delete wellness history</button>
         </>}

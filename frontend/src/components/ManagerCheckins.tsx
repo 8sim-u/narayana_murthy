@@ -75,7 +75,7 @@ export default function ManagerCheckins() {
           <button type="button" className="btn" onClick={disconnect}>Disconnect</button>
         </div>}
       </div>
-      <p className="wellness-privacy-note">The server derives your roster from your manager token; this view does not use the browser’s editable team list. Only an employee ID and a generic prompt are shown—never HRV, health trends, activity values, scores, reasons, or employment consequences. Recorded active time is an imperfect work-pattern proxy: it does not establish engagement, identify high performers, or diagnose burnout, and may change for ordinary reasons such as leave, schedule changes, offline work, or data gaps. Use a prompt only to offer supportive help, never for performance or disciplinary decisions.</p>
+      <p className="wellness-privacy-note">The server derives your roster from your manager token; this view does not use the browser’s editable team list. Only an employee ID and a generic prompt are shown - never HRV, health trends, activity values, scores, reasons, or employment consequences. Recorded active time is an imperfect work-pattern proxy: it does not establish engagement, identify high performers, or diagnose burnout, and may change for ordinary reasons such as leave, schedule changes, offline work, or data gaps. Use a prompt only to offer supportive help, never for performance or disciplinary decisions.</p>
       {!managerToken && <form className="wellness-connect" onSubmit={(event) => void connect(event)}>
         <label className="field"><span className="field-label">Manager access token</span>
           <input className="input" type="password" autoComplete="off" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} />

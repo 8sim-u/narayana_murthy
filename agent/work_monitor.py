@@ -88,7 +88,7 @@ def _ensure_protected_employee_token() -> bool:
 
     employee_id = os.environ.get("WAMSS_EMPLOYEE_ID", "configured employee")
     token = simpledialog.askstring(
-        "WAMSS Work Monitor — employee credential",
+        "WAMSS Work Monitor - employee credential",
         f"Enter the personal employee token assigned to {employee_id}.\n"
         "This is not a manager credential; do not share it. Input is hidden.",
         show="*",
@@ -259,7 +259,7 @@ def _post_record(server: str, record: Dict) -> None:
 def _set_status(icon, status: Dict[str, str], text: str) -> None:
     """Keep the tray title and its live menu status in sync."""
     status["text"] = text
-    icon.title = f"WAMSS Work Monitor — {text}"
+    icon.title = f"WAMSS Work Monitor - {text}"
     icon.update_menu()
 
 
@@ -293,14 +293,14 @@ def _run_monitor(
 
     while not stop_event.is_set():
         if not is_consented(employee_id=employee_id):
-            _set_status(icon, status, "Consent withdrawn — monitoring stopped")
+            _set_status(icon, status, "Consent withdrawn - monitoring stopped")
             stop_event.set()
             break
         try:
             idle_seconds = get_idle_seconds()
             app_name, title = get_active_window()
             if _is_excluded(app_name, title):
-                _set_status(icon, status, "Privacy exclusion active — not recording")
+                _set_status(icon, status, "Privacy exclusion active - not recording")
                 segment_start = datetime.now(timezone.utc)
             else:
                 record = _activity_record(
@@ -320,7 +320,7 @@ def _run_monitor(
         except (OSError, urllib.error.URLError, ValueError) as exc:
             observed = status.get("text", "")
             if observed in {"WORKING", "IDLE"}:
-                _set_status(icon, status, f"{observed} — backend unavailable")
+                _set_status(icon, status, f"{observed} - backend unavailable")
             else:
                 _set_status(icon, status, "Backend unavailable")
             print(f"activity post failed: {type(exc).__name__}", file=sys.stderr)
@@ -384,7 +384,7 @@ def main() -> int:
     def withdraw_monitor(icon, _item) -> None:
         if prompt_withdraw_consent():
             stop_event.set()
-            _set_status(icon, status, "Consent withdrawn — monitoring stopped")
+            _set_status(icon, status, "Consent withdrawn - monitoring stopped")
             icon.stop()
 
     menu = pystray.Menu(
@@ -392,7 +392,7 @@ def main() -> int:
         pystray.MenuItem("Withdraw consent and stop", withdraw_monitor),
         pystray.MenuItem("Exit", exit_monitor),
     )
-    icon = pystray.Icon("WAMSS Work Monitor", image, "WAMSS Work Monitor — starting", menu)
+    icon = pystray.Icon("WAMSS Work Monitor", image, "WAMSS Work Monitor - starting", menu)
     worker = threading.Thread(
         target=_run_monitor,
         args=(stop_event, icon, status, server, idle_threshold, interval),
