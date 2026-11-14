@@ -351,13 +351,17 @@ def main() -> int:
         _show_error(str(exc))
         return 2
 
-    if not _ensure_protected_employee_token():
-        return 2
-
-    from consent import configured_employee_id, ensure_consent, prompt_withdraw_consent
+    # Consent runs before any credential is collected: the monitor must not
+    # ask for or load an employee token until the employee has consented.
+    from consent import configured_employee_id, ensure_consent
 
     if not ensure_consent(employee_id=configured_employee_id()):
         return 1
+
+    if not _ensure_protected_employee_token():
+        return 2
+
+    from consent import prompt_withdraw_consent
 
     try:
         from PIL import Image, ImageDraw

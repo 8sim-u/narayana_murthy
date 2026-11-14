@@ -21,7 +21,7 @@ class _Session:
         self.batches = []
         self.headers = []
 
-    def post(self, _url, json, timeout, headers):
+    def post(self, _url, json, timeout, headers, allow_redirects=True):
         self.batches.append(list(json["records"]))
         self.headers.append(headers)
         if self.fail:
@@ -33,13 +33,25 @@ def _record(index):
     return {"record_id": str(uuid.uuid4()), "sequence": index}
 
 
-def test_sync_failure_keeps_spool_and_recovery_preserves_batch_order(tmp_path):
+def test_sync_failure_keeps_spool_and_recovery_preserves_batch_order(tmp_path, monkeypatch):
+    import activity_agent
+    import consent
+
+    # Syncer refuses to upload without workstation consent, so record it
+    # for the configured employee before exercising the spool.
+    marker = tmp_path / "consent.json"
+    monkeypatch.setenv("WAMSS_CONSENT_FILE", str(marker))
+    consent.record_consent(
+        employee_id=activity_agent.EMPLOYEE_ID,
+        os_user=consent.current_os_user(),
+    )
     spool = Spool(str(tmp_path))
     records = [_record(i) for i in range(3)]
     for record in records:
         spool.append(record)
 
-    syncer = Syncer(spool, "http://backend.invalid", employee_token="sync-test-token")
+    # Loopback URL: sync_once only allows HTTPS or loopback HTTP.
+    syncer = Syncer(spool, "http://127.0.0.1:8000", employee_token="sync-test-token")
     offline_session = _Session(fail=True)
     syncer.session = offline_session
     assert syncer.sync_once() is False

@@ -91,8 +91,16 @@ def test_presence_and_analytics_never_return_other_employee(monkeypatch):
     data = trends.json()
     assert data["per_employee"]
     assert {row["employee_id"] for row in data["per_employee"]} == {self_id}
-    # Team values, if present, are necessarily calculated from this same scoped row set.
-    assert all(team["employee_count"] <= 1 for team in data["team"])
+    # Personal rollup values, if present, are necessarily calculated from this same scoped row set.
+    assert all(row["employee_count"] <= 1 for row in data["personal"])
+    # The personal rollup mirrors the caller's own weekly mean, never a blend
+    # with another employee's data from the same week.
+    for personal_row in data["personal"]:
+        mine = [
+            row for row in data["per_employee"]
+            if row["week_start"] == personal_row["week_start"]
+        ]
+        assert personal_row["average_focus"] == mine[0]["average_focus"]
     assert other_id not in str(data)
 
 

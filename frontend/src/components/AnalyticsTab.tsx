@@ -9,7 +9,7 @@ const API_URL =
 
 type Metric = "focus" | "strain";
 
-interface TeamFocusRow {
+interface PersonalFocusRow {
   week_start: string;
   average_focus: number | null;
   min_focus: number | null;
@@ -24,7 +24,7 @@ interface EmployeeFocusRow {
   days_with_data: number;
 }
 
-interface TeamStrainRow {
+interface PersonalStrainRow {
   week_start: string;
   average_strain: number | null;
   green: number;
@@ -49,7 +49,7 @@ interface TrendsResponse {
   metric: string;
   weeks: number;
   per_employee: (EmployeeFocusRow | EmployeeStrainRow)[];
-  team: (TeamFocusRow | TeamStrainRow)[];
+  personal: (PersonalFocusRow | PersonalStrainRow)[];
 }
 
 const CHART_W = 560;
@@ -192,13 +192,13 @@ export default function AnalyticsTab() {
     };
   }, [metric, weeks]);
 
-  const latestTeam = useMemo(
-    () => (data && data.team.length > 0 ? data.team[data.team.length - 1] : null),
+  const latestPersonal = useMemo(
+    () => (data && data.personal.length > 0 ? data.personal[data.personal.length - 1] : null),
     [data]
   );
 
   const latestWeek = useMemo(
-    () => (data && data.team.length > 0 ? data.team[data.team.length - 1].week_start : null),
+    () => (data && data.personal.length > 0 ? data.personal[data.personal.length - 1].week_start : null),
     [data]
   );
 
@@ -233,8 +233,8 @@ export default function AnalyticsTab() {
           </div>
           <p style={{ color: "var(--text-2)", fontSize: 13, margin: 0, maxWidth: "80ch" }}>
             {metric === "focus"
-              ? "Weekly mean of daily focus scores per employee; team value is the mean of employee weekly means. Days with no data are excluded."
-              : "Weekly mean strain score per employee with green/amber/red level counts. Strain is a heuristic workload signal, not a medical measure."}
+              ? "Weekly mean of your daily focus scores. Days with no data are excluded."
+              : "Weekly mean of your strain scores with green/amber/red level counts. Strain is a heuristic workload signal, not a medical measure."}
           </p>
         </section>
       </Reveal>
@@ -264,21 +264,21 @@ export default function AnalyticsTab() {
       ) : data ? (
         <>
           <Reveal>
-            <section className="panel" aria-label="Team weekly average">
-              <SectionHead title="Team Average per Week" />
+            <section className="panel" aria-label="Personal weekly average">
+              <SectionHead title="Your Average per Week" />
               <div key={`${metric}-${weeks}`}>
                 {metric === "focus" ? (
                   <BarChart
-                    labels={data.team.map((t) => shortWeek(t.week_start))}
-                    values={(data.team as TeamFocusRow[]).map((t) => t.average_focus)}
+                    labels={data.personal.map((t) => shortWeek(t.week_start))}
+                    values={(data.personal as PersonalFocusRow[]).map((t) => t.average_focus)}
                     max={100}
                     color="var(--iris)"
                     format={(v) => v.toFixed(0)}
                   />
                 ) : (
                   <BarChart
-                    labels={data.team.map((t) => shortWeek(t.week_start))}
-                    values={(data.team as TeamStrainRow[]).map((t) => t.average_strain)}
+                    labels={data.personal.map((t) => shortWeek(t.week_start))}
+                    values={(data.personal as PersonalStrainRow[]).map((t) => t.average_strain)}
                     max={100}
                     color={strainColor}
                     format={(v) => v.toFixed(0)}
@@ -289,10 +289,10 @@ export default function AnalyticsTab() {
           </Reveal>
 
           <Reveal>
-            <section className="panel" aria-label="Latest week per employee">
-              <SectionHead title={`Latest Week (${latestWeek ?? "n/a"})`} meta={`${latestEmployees.length} employees`} />
+            <section className="panel" aria-label="Latest week">
+              <SectionHead title={`Latest Week (${latestWeek ?? "n/a"})`} meta="your week" />
               {latestEmployees.length === 0 ? (
-                <EmptyState title="No employee data" body="No per-employee rows were returned for the latest week." />
+                <EmptyState title="No data for this week" body="No weekly rows were returned for the latest week." />
               ) : (
                 <div className="table-wrap">
                   <table className="ledger">
@@ -345,13 +345,12 @@ export default function AnalyticsTab() {
                 </div>
               )}
 
-              {latestTeam && metric === "strain" && (
+              {latestPersonal && metric === "strain" && (
                 <p style={{ color: "var(--text-2)", fontSize: 13, marginTop: 12 }}>
-                  Team this week:{" "}
-                  <Chip tone="ok">{(latestTeam as TeamStrainRow).green} green</Chip>{" "}
-                  <Chip tone="warn">{(latestTeam as TeamStrainRow).amber} amber</Chip>{" "}
-                  <Chip tone="bad">{(latestTeam as TeamStrainRow).red} red</Chip>{" "}
-                  across {(latestTeam as TeamStrainRow).employee_count} employees.
+                  Your week:{" "}
+                  <Chip tone="ok">{(latestPersonal as PersonalStrainRow).green} green</Chip>{" "}
+                  <Chip tone="warn">{(latestPersonal as PersonalStrainRow).amber} amber</Chip>{" "}
+                  <Chip tone="bad">{(latestPersonal as PersonalStrainRow).red} red</Chip>
                 </p>
               )}
             </section>

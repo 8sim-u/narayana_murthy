@@ -21,18 +21,20 @@ metric=focus
     ActivityLog rows (event_type="activity") for the day. Days with no rows
     carry no data and are excluded (they do not drag the average down).
     The per-employee weekly value is the mean of that employee's daily scores
-    with data. The team rollup for a week is the mean of the per-employee
-    weekly means (employees with no data that week are excluded), plus the
-    min/max across employees and the employee count.
+    with data. The personal rollup for a week is the caller's own weekly
+    mean: this endpoint is scoped to the caller's employee token, so only
+    the caller's rows are read and no other employee's data contributes.
+    The min/max therefore equal the caller's mean, and employee_count is 1
+    when the caller has data that week, else 0.
 
 metric=strain
     For each employee and each week, average strain_score over activity rows
     with a non-null strain_score, plus the count of rows in each strain level
     (green < 40, amber 40-69, red >= 70; see app.activity.strain_level). Rows
     with a null strain_score do not count toward the average but are tallied
-    as "unknown". The team rollup is the mean of per-employee weekly averages
-    and the summed level counts. Strain is a heuristic workload signal, not a
-    medical measure.
+    as "unknown". The personal rollup is the caller's own weekly average
+    and level counts, for the same per-person scoping reason as above.
+    Strain is a heuristic workload signal, not a medical measure.
 """
 
 import logging
@@ -66,9 +68,9 @@ class EmployeeFocusTrend(BaseModel):
     days_with_data: int
 
 
-class TeamFocusTrend(BaseModel):
+class PersonalFocusTrend(BaseModel):
     week_start: date
-    average_focus: Optional[float] = Field(None, description="Mean of per-employee weekly means")
+    average_focus: Optional[float] = Field(None, description="Caller's own weekly mean of daily focus scores")
     min_focus: Optional[float] = None
     max_focus: Optional[float] = None
     employee_count: int
@@ -78,7 +80,7 @@ class FocusTrendsOut(BaseModel):
     metric: str = "focus"
     weeks: int
     per_employee: List[EmployeeFocusTrend]
-    team: List[TeamFocusTrend]
+    personal: List[PersonalFocusTrend]
 
 
 class EmployeeStrainTrend(BaseModel):
@@ -92,9 +94,9 @@ class EmployeeStrainTrend(BaseModel):
     records: int
 
 
-class TeamStrainTrend(BaseModel):
+class PersonalStrainTrend(BaseModel):
     week_start: date
-    average_strain: Optional[float] = Field(None, description="Mean of per-employee weekly averages")
+    average_strain: Optional[float] = Field(None, description="Caller's own weekly mean strain_score")
     green: int
     amber: int
     red: int
@@ -106,7 +108,7 @@ class StrainTrendsOut(BaseModel):
     metric: str = "strain"
     weeks: int
     per_employee: List[EmployeeStrainTrend]
-    team: List[TeamStrainTrend]
+    personal: List[PersonalStrainTrend]
 
 
 # ---------------------------------------------------------------- helpers
@@ -170,12 +172,14 @@ def get_trends(
     employee_id: str = Depends(require_employee),
 ):
     """
-    Weekly aggregates per employee plus team-level rollups.
+    Weekly aggregates for the caller only, plus a per-person rollup.
 
     - metric=focus: per-employee weekly mean of daily focus scores (days with
-      data only), and team mean/min/max of those weekly means.
+      data only), and the caller's own weekly mean as the personal rollup.
     - metric=strain: per-employee weekly mean strain_score plus green/amber/
-      red/unknown level counts, and the team-level mean and summed counts.
+      red/unknown level counts, and the caller's own values as the personal
+      rollup. The rollup is named personal because the endpoint reads only
+      the caller's rows; it never aggregates other employees.
     """
     if metric not in ("focus", "strain"):
         raise HTTPException(
@@ -197,7 +201,7 @@ def get_trends(
         )
 
     per_employee: List[BaseModel] = []
-    team: List[BaseModel] = []
+    personal: List[BaseModel] = []
 
     utc_rows = [
         (row, _as_utc(row.start_time), _as_utc(row.end_time))
@@ -236,8 +240,8 @@ def get_trends(
                         days_with_data=len(daily_scores),
                     )
                 )
-            team.append(
-                TeamFocusTrend(
+            personal.append(
+                PersonalFocusTrend(
                     week_start=week_start,
                     average_focus=_mean(weekly_means),
                     min_focus=min(weekly_means) if weekly_means else None,
@@ -271,8 +275,8 @@ def get_trends(
                         records=len(employee_rows),
                     )
                 )
-            team.append(
-                TeamStrainTrend(
+            personal.append(
+                PersonalStrainTrend(
                     week_start=week_start,
                     average_strain=_mean(weekly_means),
                     green=totals["green"],
@@ -284,5 +288,5 @@ def get_trends(
             )
 
     if metric == "focus":
-        return FocusTrendsOut(metric="focus", weeks=weeks, per_employee=per_employee, team=team)
-    return StrainTrendsOut(metric="strain", weeks=weeks, per_employee=per_employee, team=team)
+        return FocusTrendsOut(metric="focus", weeks=weeks, per_employee=per_employee, personal=personal)
+    return StrainTrendsOut(metric="strain", weeks=weeks, per_employee=per_employee, personal=personal)

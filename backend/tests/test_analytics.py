@@ -116,7 +116,7 @@ def test_focus_trends_math(monkeypatch):
     data = resp.json()
     assert data["metric"] == "focus"
     assert data["weeks"] == 2
-    assert len(data["team"]) == 2
+    assert len(data["personal"]) == 2
 
     today = date.today()
     week0_start = today - timedelta(days=6)
@@ -149,17 +149,17 @@ def test_focus_trends_math(monkeypatch):
     assert expected_low < expected_high
     assert by_week[week1_start.isoformat()]["average_focus"] == expected_low
 
-    # Internal consistency of the team rollup: mean of per-employee weekly means.
-    for team_row in data["team"]:
-        week = team_row["week_start"]
+    # Internal consistency of the personal rollup: mean of per-employee weekly means.
+    for personal_row in data["personal"]:
+        week = personal_row["week_start"]
         emp_avgs = [
             r["average_focus"]
             for r in data["per_employee"]
             if r["week_start"] == week and r["average_focus"] is not None
         ]
-        expected_team = round(sum(emp_avgs) / len(emp_avgs), 1)
-        assert team_row["average_focus"] == expected_team
-        assert team_row["employee_count"] == len(emp_avgs)
+        expected_personal = round(sum(emp_avgs) / len(emp_avgs), 1)
+        assert personal_row["average_focus"] == expected_personal
+        assert personal_row["employee_count"] == len(emp_avgs)
 
 
 def test_strain_trends_math(monkeypatch):
@@ -196,10 +196,10 @@ def test_strain_trends_math(monkeypatch):
     assert row["unknown"] == expected_levels["unknown"] == 1
     assert row["records"] == 6
 
-    # Team rollup: summed level counts match the sum over employees in the week.
-    team = [t for t in data["team"] if t["week_start"] == week0_start][0]
+    # Personal rollup: summed level counts match the sum over employees in the week.
+    personal = [t for t in data["personal"] if t["week_start"] == week0_start][0]
     for key in ("green", "amber", "red", "unknown"):
-        assert team[key] == sum(
+        assert personal[key] == sum(
             r[key] for r in data["per_employee"] if r["week_start"] == week0_start
         )
 

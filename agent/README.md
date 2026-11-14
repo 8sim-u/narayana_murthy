@@ -300,7 +300,10 @@ forwards them as structured dicts.
 Build the single-file executable with `agent/build_exe.ps1`. Place a
 `config.env` beside `WAMSSWorkMonitor.exe` containing `WAMSS_AGENT_SERVER_URL`,
 `WAMSS_IDLE_AFTER_SEC`, and `WAMSS_LOG_INTERVAL`; the executable has no
-hard-coded server or idle policy. It shows a tray status of **WORKING** when
+hard-coded server or idle policy. The build copies your `config.env` beside
+the executable when one exists, otherwise it copies `config.env.example`
+as a starter template to fill in. Without a `config.env` the executable
+exits before collection, so fill in the template first. It shows a tray status of **WORKING** when
 last input is newer than the configured idle threshold and **IDLE** once the
 threshold is reached. The tray updates from local observation even if the
 backend is unavailable; backend failure is displayed alongside that state.
