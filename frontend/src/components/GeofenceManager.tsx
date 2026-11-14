@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react';
-import { createGeofence, deleteGeofence, getGeofences } from '../api';
+import { createGeofence, deleteGeofence, getGeofences, getPositions } from '../api';
 import type { GeofencePoint, GeofenceZone, PersonPosition } from '../types';
 import { EmptyState, ErrorNotice, SectionHead } from './ui';
 
 const MAP_W = 1000;
 const MAP_H = 620;
+const POSITIONS_POLL_MS = 5000;
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -19,8 +20,9 @@ function isKnownName(name: string | null | undefined): boolean {
   return !!name && name.trim() !== '' && name.trim().toLowerCase() !== 'unknown';
 }
 
-export default function GeofenceManager({ positions }: { positions: PersonPosition[] }) {
+export default function GeofenceManager() {
   const [zones, setZones] = useState<GeofenceZone[]>([]);
+  const [positions, setPositions] = useState<PersonPosition[]>([]);
   const [selectedCamera, setSelectedCamera] = useState('');
   const [cameraDraft, setCameraDraft] = useState('');
   const [zoneName, setZoneName] = useState('');
@@ -58,11 +60,25 @@ export default function GeofenceManager({ positions }: { positions: PersonPositi
     }
   }, []);
 
+  const loadPositions = useCallback(async () => {
+    try {
+      setPositions(await getPositions());
+    } catch {
+      // Live positions are an overlay; zone management still works without them.
+    }
+  }, []);
+
   useEffect(() => {
     void loadZones();
     const refresh = window.setInterval(() => { void loadZones(); }, 30000);
     return () => window.clearInterval(refresh);
   }, [loadZones]);
+
+  useEffect(() => {
+    void loadPositions();
+    const poll = window.setInterval(() => { void loadPositions(); }, POSITIONS_POLL_MS);
+    return () => window.clearInterval(poll);
+  }, [loadPositions]);
 
   useEffect(() => {
     if (!selectedCamera && cameraOptions.length > 0) setSelectedCamera(cameraOptions[0]);

@@ -1,8 +1,8 @@
-// Identity review panels for the Room Map tab: unknown sightings awaiting
-// enrollment, and the registry of known people. The identity endpoints
-// (/identities, /unknowns, POST /faces/enroll, DELETE /faces/{name}) land
-// separately from this UI, so a 404 resolves to an empty list and the
-// panels render a graceful empty state instead of an error.
+// Identity tab panels: unknown sightings awaiting enrollment, and the
+// registry of known people. The identity endpoints (/identities, /unknowns,
+// POST /faces/enroll, DELETE /faces/{name}) land separately from this UI, so
+// a 404 resolves to an empty list and the panels render a graceful empty
+// state instead of an error.
 import { useCallback, useEffect, useState } from 'react';
 import { deleteIdentity, enrollFace, getIdentities, getUnknowns, snapshotUrl } from '../api';
 import type { Identity, UnknownSighting } from '../types';
@@ -310,5 +310,18 @@ export function KnownPeopleList() {
         </div>
       )}
     </section>
+  );
+}
+
+
+/** Identity tab: the unknowns queue and the known people list side by side. */
+export default function IdentityPanels() {
+  return (
+    <div className="rise">
+      <div className="grid-2">
+        <UnknownPeoplePanel />
+        <KnownPeopleList />
+      </div>
+    </div>
   );
 }

@@ -10,7 +10,6 @@
 // ad-hoc employee lists.
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowClockwise } from '@phosphor-icons/react';
-import ManagerCheckins from './ManagerCheckins';
 import {
   Chip, Dot, EmptyState, ErrorNotice, Field, Meter, Reveal,
   SectionHead, SkeletonRows, Stat,
@@ -537,8 +536,6 @@ export default function TeamView({ officeId = "" }: { officeId?: string }) {
           </p>
         </section>
       </Reveal>
-
-      <Reveal><ManagerCheckins /></Reveal>
 
       <div key={refreshKey}>
         <Reveal><FocusPanel employees={employees} officeId={officeId} /></Reveal>
