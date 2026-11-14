@@ -5,6 +5,7 @@ import { getHeatmap, getOccupancy, getPositions } from '../api';
 import type { HeatPoint, OccupancyBucket, PersonPosition } from '../types';
 import { KnownPeopleList, UnknownPeoplePanel } from './IdentityPanels';
 import { EmptyState, ErrorNotice, SectionHead, SkeletonCards, Stat } from './ui';
+import GeofenceManager from './GeofenceManager';
 
 const POLL_MS = 2000;
 const OCCUPANCY_REFRESH_MS = 60000;
@@ -407,6 +408,8 @@ export default function RoomMapTab() {
           </figure>
         )}
       </section>
+
+      <GeofenceManager positions={positions} />
 
       <section className="panel" aria-label="Occupancy timeline" style={{ marginTop: 20 }}>
         <SectionHead title="Occupancy Timeline" meta="last 24h, 15m buckets" />

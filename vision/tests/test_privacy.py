@@ -313,9 +313,8 @@ def test_allowed_models_pass(monkeypatch, kind):
 
 
 def test_build_gallery_refresher_none_in_privacy_mode(monkeypatch):
-    """Privacy mode builds no gallery sync, even when a backend is
-    configured and face recognition is on: no version polls, no gallery
-    fetches, no face identification of any kind."""
+    """Privacy mode builds no camera gallery, even when configured: no
+    gallery fetches or face identification of any kind."""
     class _FakeFaceId:
         GALLERY_DIR = "/tmp/no-such-gallery"
         reload_calls = 0
@@ -336,13 +335,12 @@ def test_build_gallery_refresher_none_in_privacy_mode(monkeypatch):
 
 
 def test_gallery_refresher_refuses_to_poll_in_privacy_mode(monkeypatch):
-    """A refresher built with privacy_mode=True is disabled and performs
-    no HTTP fetch, even when a getter is supplied."""
+    """The legacy unscoped refresher is inert, even when a getter is supplied."""
     mod = _load_multicamera(monkeypatch, privacy=True,
                             mediapipe_detections="absent")
 
     def _raising_http(url, timeout=2.0, headers=None):
-        raise AssertionError("privacy mode must perform no gallery fetch")
+        raise AssertionError("the unscoped refresher must not fetch any gallery")
 
     refresher = mod.GalleryRefresher(
         "http://192.0.2.20:8000", 30.0, object(),
@@ -397,3 +395,59 @@ def test_privacy_event_has_no_track_id(monkeypatch):
     }
     assert "track_id" not in event
     assert "boxes" not in event
+
+
+def test_camera_gallery_is_camera_scoped_and_clears_on_refresh_failure(monkeypatch):
+    mod = _load_multicamera(monkeypatch, privacy=False,
+                            mediapipe_detections="absent")
+    calls = []
+
+    class _Response:
+        def __init__(self, data=None, error=False):
+            self.data = data
+            self.error = error
+
+        def raise_for_status(self):
+            if self.error:
+                raise RuntimeError("revoked/unavailable")
+
+        def json(self):
+            return self.data
+
+    def _get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        if len(calls) == 1:
+            return _Response([{"name": "Consented Person", "embedding": [0.1, 0.2]}])
+        return _Response(error=True)
+
+    gallery = mod.CameraGallery(
+        "CAM_01", "http://backend", http_get=_get)
+    assert gallery.maybe_refresh(1.0) is True
+    assert calls[0][1] == {"camera_id": "CAM_01"}
+    assert [entry["name"] for entry in gallery.entries] == ["Consented Person"]
+
+    assert gallery.maybe_refresh(2.0, force=True) is True
+    assert gallery.entries == []
+
+
+def test_identification_requires_nonempty_camera_consent_gallery(monkeypatch):
+    mod = _load_multicamera(monkeypatch, privacy=False,
+                            mediapipe_detections="absent")
+    calls = []
+
+    class _FaceId:
+        def identify_with_confidence(self, crop, gallery_entries=None):
+            calls.append(gallery_entries)
+            return "Consented Person", 0.99
+
+    mod._face_id = _FaceId()
+    frame = _synthetic_frame()
+    assert mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=[]) == ("unknown", None)
+    assert calls == []
+
+    allowed = [{"name": "Consented Person", "embedding": [0.1]}]
+    assert mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=allowed) == (
+            "Consented Person", 0.99)
+    assert calls == [allowed]

@@ -25,7 +25,31 @@ interface PresenceItem {
   window_sec: number;
 }
 
+interface AttendanceItem {
+  employee_id: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  present_minutes: number;
+  camera_minutes: number;
+  computer_minutes: number;
+  sources: string[];
+}
+
+interface DailyAttendance {
+  day: string;
+  enabled: boolean;
+  items: AttendanceItem[];
+}
+
 const REFRESH_MS = 10000;
+
+function formatUtcClock(value: string | null): string {
+  if (!value) return "-";
+  const instant = new Date(value);
+  return Number.isNaN(instant.getTime())
+    ? value
+    : instant.toLocaleString(undefined, { timeZone: "UTC" });
+}
 
 const STATE_TONE: Record<PresenceState, "ok" | "warn" | "bad" | "idle"> = {
   PRESENT_AND_ACTIVE: "ok",
@@ -51,16 +75,22 @@ const STATE_DESCRIPTIONS: Record<PresenceState, string> = {
 
 export default function PresenceView({ officeId = "" }: { officeId?: string }) {
   const [items, setItems] = useState<PresenceItem[]>([]);
+  const [attendance, setAttendance] = useState<DailyAttendance | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       const params = officeId ? `?office_id=${encodeURIComponent(officeId)}` : "";
-      const res = await fetch(`${API_URL}/presence${params}`);
+      const [res, attendanceRes] = await Promise.all([
+        fetch(`${API_URL}/presence${params}`),
+        fetch(`${API_URL}/attendance/daily`),
+      ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!attendanceRes.ok) throw new Error(`attendance: HTTP ${attendanceRes.status}`);
       const data: PresenceItem[] = await res.json();
       setItems(data);
+      setAttendance(await attendanceRes.json());
       setError(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load presence data");
@@ -112,6 +142,51 @@ export default function PresenceView({ officeId = "" }: { officeId?: string }) {
             <code>WAMSS_ZONE_MAP</code> backend setting; the lookback window from{" "}
             <code>WAMSS_PRESENCE_WINDOW_SEC</code> (default 300 seconds).
           </p>
+        </section>
+      </Reveal>
+
+      <Reveal>
+        <section className="panel" aria-label="Daily attendance">
+          <SectionHead
+            title="Daily Attendance"
+            meta={attendance?.enabled ? `${attendance.day} · UTC` : "opt-in"}
+          />
+          {!attendance?.enabled ? (
+            <p style={{ color: "var(--text-2)", fontSize: 13, margin: 0, maxWidth: "80ch" }}>
+              Daily attendance is disabled by default. Enable it with <code>WAMSS_ATTENDANCE_ENABLED=1</code> after providing employee notice and configuring camera identity links where needed.
+            </p>
+          ) : attendance.items.length === 0 ? (
+            <EmptyState title="No attendance sources today" body="Recognized enrolled camera sightings and non-idle workstation segments appear here with their source." />
+          ) : (
+            <div className="table-wrap">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th>Employee</th>
+                    <th>First seen (UTC)</th>
+                    <th>Last seen (UTC)</th>
+                    <th>Present</th>
+                    <th>Camera</th>
+                    <th>Computer</th>
+                    <th>Sources</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {attendance.items.map((row) => (
+                    <tr key={row.employee_id}>
+                      <td className="id">{row.employee_id}</td>
+                      <td className="num">{formatUtcClock(row.first_seen)}</td>
+                      <td className="num">{formatUtcClock(row.last_seen)}</td>
+                      <td className="num">{row.present_minutes.toFixed(1)} min</td>
+                      <td className="num">{row.camera_minutes.toFixed(1)} min</td>
+                      <td className="num">{row.computer_minutes.toFixed(1)} min</td>
+                      <td>{row.sources.join(", ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       </Reveal>
 

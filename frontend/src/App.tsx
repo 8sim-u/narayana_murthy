@@ -15,11 +15,12 @@ import AnalyticsTab from './components/AnalyticsTab';
 import RoomMapTab from './components/RoomMapTab';
 import OfficeSelector from './components/OfficeSelector';
 import ExportButton from './components/ExportButton';
+import WellnessDashboard from './components/WellnessDashboard';
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_LIMIT = 100;
 
-type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics' | 'roommap';
+type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics' | 'roommap' | 'personal';
 
 const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
   { id: 'events', label: 'Vision Events', kicker: 'Camera network', blurb: 'Detection feed from every camera zone, refreshed live.' },
@@ -29,6 +30,7 @@ const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
   { id: 'security', label: 'Security', kicker: 'Anomaly feed', blurb: 'USB, after-hours and write-burst anomaly feed.' },
   { id: 'policy', label: 'Policy', kicker: 'Rules and privacy', blurb: 'Working-time rules, violation checks and privacy controls.' },
   { id: 'team', label: 'Team', kicker: 'Aggregates', blurb: 'Focus, strain, break compliance and presence per team.' },
+  { id: 'personal', label: 'My Wellness', kicker: 'Employee-only', blurb: 'Your private activity summary, optional wellness data and self-coaching tools.' },
   { id: 'analytics', label: 'Trends', kicker: 'Week over week', blurb: 'Weekly focus and strain movement.' },
   { id: 'roommap', label: 'Room Map', kicker: 'Live floor plan', blurb: 'Tracked persons, dwell heatmap and occupancy timeline.' },
 ];
@@ -43,6 +45,7 @@ const PAGE_TITLES: Record<Tab, string> = {
   team: 'Team view',
   analytics: 'Trends',
   roommap: 'Room Map',
+  personal: 'My Wellness',
 };
 
 function useClock(): string {
@@ -189,6 +192,7 @@ export default function App() {
           {tab === 'team' && <TeamView officeId={officeId} />}
           {tab === 'analytics' && <AnalyticsTab />}
           {tab === 'roommap' && <RoomMapTab />}
+          {tab === 'personal' && <WellnessDashboard />}
         </div>
 
         <footer className="footer-note">

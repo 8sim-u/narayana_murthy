@@ -9,7 +9,7 @@ init_db() for the table to be created.
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models import Base
@@ -19,6 +19,9 @@ class ActivityLog(Base):
     __tablename__ = "activity_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Nullable to preserve compatibility with legacy senders. New offline
+    # agents provide this stable ID so retries cannot create duplicate rows.
+    record_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     machine_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     employee_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     # Office / site the workstation belongs to. server_default keeps older
@@ -49,3 +52,22 @@ class ActivityLog(Base):
         default=lambda: datetime.now(timezone.utc),
         index=True,
     )
+    # Hashes cover the persisted activity payload and the previous retained
+    # event. Nullable during additive migration of existing databases.
+    previous_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    event_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+
+Index("ix_activity_logs_record_id_unique", ActivityLog.record_id, unique=True)
+
+
+class ActivityAuditHead(Base):
+    """Singleton append head and retained-prefix checkpoint for activity logs."""
+
+    __tablename__ = "activity_audit_head"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_event_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    pruned_through_event_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pruned_through_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

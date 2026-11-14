@@ -74,6 +74,7 @@ except Exception:  # pragma: no cover - defensive when sibling file is not prese
     _ACTIVITY_MODEL_AVAILABLE = False
 
 from app.database import get_db
+from app.employee_auth import ensure_employee_match, require_employee
 
 logger = logging.getLogger("wamss.api.focus")
 
@@ -345,8 +346,11 @@ def get_daily_focus(
     date_: Optional[date] = Query(None, alias="date", description="Date (YYYY-MM-DD); defaults to today"),
     office_id: Optional[str] = Query(None, description="Filter to this office ID (e.g. hq, branch-north)"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """Daily focus score for one employee, computed on the fly from ActivityLog rows."""
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     if not _ACTIVITY_MODEL_AVAILABLE:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -367,8 +371,11 @@ def get_daily_focus(
 def get_focus_streaks(
     employee_id: str = Query(..., description="Employee ID (required)"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """Focus streaks and earned badges for one employee."""
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     if not _ACTIVITY_MODEL_AVAILABLE:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

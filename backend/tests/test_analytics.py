@@ -2,6 +2,8 @@
 dedicated test FastAPI app, per the agent-4 contract)."""
 
 from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -28,6 +30,15 @@ def _make_client() -> TestClient:
     app.include_router(analytics_router)
     app.dependency_overrides[get_db] = _override_get_db
     return TestClient(app)
+
+
+def _employee_headers(monkeypatch, employee_id: str):
+    token = f"analytics-test-token:{employee_id}"
+    monkeypatch.setenv(
+        "WAMSS_EMPLOYEE_TOKEN_HASHES",
+        json.dumps({employee_id: hashlib.sha256(token.encode()).hexdigest()}),
+    )
+    return {"X-Employee-Token": token}
 
 
 def _cleanup(db):
@@ -91,18 +102,21 @@ def _week_start(d: date) -> date:
     return d - timedelta(days=6)
 
 
-def test_focus_trends_math():
+def test_focus_trends_math(monkeypatch):
     db = SessionLocal()
     emp_focus, _ = _seed(db)
     db.close()
 
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "focus", "weeks": 2})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "focus", "weeks": 2},
+        headers=_employee_headers(monkeypatch, emp_focus),
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["metric"] == "focus"
     assert data["weeks"] == 2
-    assert len(data["team"]) == 2
+    assert len(data["personal"]) == 2
 
     today = date.today()
     week0_start = today - timedelta(days=6)
@@ -110,6 +124,7 @@ def test_focus_trends_math():
 
     mine = [r for r in data["per_employee"] if r["employee_id"] == emp_focus]
     assert len(mine) == 2
+    assert {r["employee_id"] for r in data["per_employee"]} == {emp_focus}
     by_week = {r["week_start"]: r for r in mine}
 
     # Expected scores computed with the same pure scorer the endpoint uses.
@@ -134,26 +149,29 @@ def test_focus_trends_math():
     assert expected_low < expected_high
     assert by_week[week1_start.isoformat()]["average_focus"] == expected_low
 
-    # Internal consistency of the team rollup: mean of per-employee weekly means.
-    for team_row in data["team"]:
-        week = team_row["week_start"]
+    # Internal consistency of the personal rollup: mean of per-employee weekly means.
+    for personal_row in data["personal"]:
+        week = personal_row["week_start"]
         emp_avgs = [
             r["average_focus"]
             for r in data["per_employee"]
             if r["week_start"] == week and r["average_focus"] is not None
         ]
-        expected_team = round(sum(emp_avgs) / len(emp_avgs), 1)
-        assert team_row["average_focus"] == expected_team
-        assert team_row["employee_count"] == len(emp_avgs)
+        expected_personal = round(sum(emp_avgs) / len(emp_avgs), 1)
+        assert personal_row["average_focus"] == expected_personal
+        assert personal_row["employee_count"] == len(emp_avgs)
 
 
-def test_strain_trends_math():
+def test_strain_trends_math(monkeypatch):
     db = SessionLocal()
     _, emp_strain = _seed(db)
     db.close()
 
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "strain", "weeks": 1})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "strain", "weeks": 1},
+        headers=_employee_headers(monkeypatch, emp_strain),
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["metric"] == "strain"
@@ -164,6 +182,7 @@ def test_strain_trends_math():
     mine = [r for r in data["per_employee"]
             if r["employee_id"] == emp_strain and r["week_start"] == week0_start]
     assert len(mine) == 1
+    assert {r["employee_id"] for r in data["per_employee"]} == {emp_strain}
     row = mine[0]
 
     scores = [80, 85, 50, 60, 20]
@@ -177,15 +196,18 @@ def test_strain_trends_math():
     assert row["unknown"] == expected_levels["unknown"] == 1
     assert row["records"] == 6
 
-    # Team rollup: summed level counts match the sum over employees in the week.
-    team = [t for t in data["team"] if t["week_start"] == week0_start][0]
+    # Personal rollup: summed level counts match the sum over employees in the week.
+    personal = [t for t in data["personal"] if t["week_start"] == week0_start][0]
     for key in ("green", "amber", "red", "unknown"):
-        assert team[key] == sum(
+        assert personal[key] == sum(
             r[key] for r in data["per_employee"] if r["week_start"] == week0_start
         )
 
 
-def test_trends_rejects_bad_metric():
+def test_trends_rejects_bad_metric(monkeypatch):
     client = _make_client()
-    resp = client.get("/analytics/trends", params={"metric": "bogus", "weeks": 2})
+    resp = client.get(
+        "/analytics/trends", params={"metric": "bogus", "weeks": 2},
+        headers=_employee_headers(monkeypatch, "analytics-invalid-metric"),
+    )
     assert resp.status_code == 422

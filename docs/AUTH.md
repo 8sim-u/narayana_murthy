@@ -1,9 +1,9 @@
 # WAMSS API key authentication
 
-The backend protects every API route with a shared API key, sent by clients in
-the `X-API-Key` HTTP header. The design is deliberately simple: one key per
-deployment, read from the environment, constant-time comparison, no user
-accounts and no database lookups on the request path.
+The backend uses a shared API key, sent by clients in the `X-API-Key` HTTP
+header, to authenticate deployment clients. This key is not an employee
+identity: employee activity and personal-history reads also require a separate
+`X-Employee-Token` that the server maps to exactly one employee.
 
 ## How to turn it on
 
@@ -43,9 +43,28 @@ probes and the interactive docs keep working:
 - `/docs`
 - `/openapi.json`
 - `/redoc`
+- `/wellness/live` (requires a valid `X-Employee-Token` and separate wellness consent)
 
-Everything else (event ingest, activity ingest, security events, focus,
-presence, policy, digest endpoints) requires the key when auth is enabled.
+When `WAMSS_API_KEY` is enabled, other routes require the deployment key except
+for **`POST /activity` requests that include `X-Employee-Token`**. This is a
+method-specific, employee-token-specific exemption: `GET /activity`, other
+methods, and `POST /activity` without an employee token are not exempt.
+Employee-scoped reads additionally require an employee token, including
+`/activity`, `/activity/app-usage`, `/activity/strain-summary`, focus and hours
+history, security alerts, policy violations, activity/focus exports, presence,
+attendance, analytics trends, and `/wellness/me`. Those routes always bind the
+query and returned records to the employee resolved from the token; an omitted
+employee filter means "my records," and requesting another employee is denied.
+`POST /activity` with an employee token resolves that token and verifies every
+submitted `employee_id` against it; an invalid or mismatched token is rejected
+and never falls back to service identity. This lets the workstation client
+avoid receiving the deployment-wide key. `POST /security/events` continues to
+require the global key when enabled. Multi-employee `/activity` ingestion
+remains available to trusted services only when
+`WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS=1` is explicitly enabled on the
+backend; such requests must omit the employee token and carry an API key already
+validated by middleware. The service exception is disabled by default, and a
+supplied employee token is always checked even when service access is enabled.
 
 ## Key distribution per deployment
 
@@ -61,10 +80,11 @@ presence, policy, digest endpoints) requires the key when auth is enabled.
   permissions (for example `chmod 600 .env`).
 - **Rotation.** Generate a fresh random key (for example 32 bytes from a
   cryptographic random source, base64 or hex encoded), update it in the same
-  place the deployment reads it, update the same value on every client
-  (vision pipeline, activity agent, simulator, digest script), then restart
-  the backend. The middleware reads the variable once at startup, so a
-  restart is what applies the new key.
+  place the deployment reads it, and update trusted clients that actually need
+  it (such as the vision pipeline, simulator, or digest script), then restart
+  the backend. Windows workstation agents use employee-scoped tokens instead
+  and never receive this global key. The middleware reads the variable once at
+  startup, so a restart is what applies the new key.
 
 ## Client setup
 
@@ -73,9 +93,10 @@ Each client sends the header only when a key is configured:
 | Client | How it picks up the key |
 |---|---|
 | `vision/multicamera.py` | `WAMSS_API_KEY` environment variable |
-| `agent/activity_agent.py` | `WAMSS_API_KEY` environment variable |
+| Windows workstation agents | Employee token in a DPAPI-protected store; the Windows installer does not provision the global key |
 | `shared/simulate.py` | `--api-key` flag or `WAMSS_API_KEY` environment variable |
 | `backend/scripts/weekly_digest.py` | `WAMSS_API_KEY` environment variable |
+| `backend/scripts/weekly_report_pdf.py` | `WAMSS_EMPLOYEE_TOKEN` plus `WAMSS_API_KEY` when enabled; personal attendance only |
 
 `agent/usb_monitor.py` makes no HTTP calls to the backend, so it needs no key.
 
@@ -105,3 +126,14 @@ calls the backend without the header and authenticated endpoints return 401.
 - The dashboard's API access goes through the frontend nginx `/api/` reverse
   proxy, which attaches the header server-side (see "Dashboard access"
   above).
+
+## Employee-scoped read, write, and wellness access
+
+Employee-scoped reads, employee-attributed writes, and wellness routes require a separate `X-Employee-Token` check. Configure `WAMSS_EMPLOYEE_TOKEN_HASHES` as a JSON object from employee ID to lowercase SHA-256 token hash. The raw personal token is not stored by the backend, and sending only an employee ID or the shared deployment key never grants access to another employee's records. Missing, malformed, or ambiguous identity configuration fails closed. See [`WELLNESS_PRIVACY.md`](WELLNESS_PRIVACY.md) for secure token generation and the separate wellness-consent flow.
+
+Keep each employee token in that employee's protected client environment; do not place it in a shared dashboard build or source control. The Windows agent stores its employee token with machine-scope DPAPI and a filesystem ACL limited to the assigned Windows user and, when enabled, the exact sync-service SID. The installer does not provision the deployment-wide API key. Employee tokens map to one employee and do not authorize manager access. The shared deployment key remains server-side in the same-origin dashboard proxy and is never bundled into browser code. Do not enable service ingestion for browser callers; the narrow service path remains disabled by default and requires a validated API key. `/wellness/live` is exempt from shared-key middleware only because it independently requires an individual token and server-side wellness consent; other optional wellness routes remain key-gated and the Windows workstation client is not provisioned with the global key.
+
+The optional `/wellness/manager-checkins` endpoint additionally requires an individual `X-Manager-Token` mapped server-side through `WAMSS_MANAGER_ROSTER_TOKEN_HASHES` to an administrator-authorized roster. This is a separate credential from both employee tokens and the deployment key; the browser cannot submit a roster. Every roster ID must exist in the configured employee-token map. Each employee must also have separately opted in to manager check-ins after enabling wellness consent. The endpoint returns only a fixed supportive prompt and the employee ID, never raw health values or unscoped records. When API-key middleware is enabled, the same-origin `/api` proxy must attach the deployment key as well. Missing or invalid manager configuration fails closed. See [`WELLNESS_PRIVACY.md`](WELLNESS_PRIVACY.md) for token setup, thresholds, notice, and prohibited uses.
+
+
+Camera events accepted with active, camera-specific consent are stamped at ingestion with the mapped employee ID. `/events`, event detail, CSV event exports, and camera-derived attendance filter by that stored owner rather than a mutable display name. Historical event rows without an owner are intentionally unavailable through personal history. The unscoped person-level map, location, geofence-history, identity, unknown-sighting, and snapshot reads remain disabled. The Issue 19 manager token authorizes only the roster-scoped wellness check-in endpoint; it does not grant access to these broader records. A deployment key alone is not manager identity. The face gallery and face enrollment/deletion operations require an enabled, middleware-validated deployment key, and gallery results additionally require active consent for the exact identity-mode camera.

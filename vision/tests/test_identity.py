@@ -335,6 +335,17 @@ class _FakeResponse:
         return {"decision": "ALLOW"}
 
 
+class _FakeGalleryResponse:
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return [
+            {"name": "Alice", "embedding": [1.0, 0.0]},
+            {"name": "Bob", "embedding": [0.0, 1.0]},
+        ]
+
+
 def _make_cv2_stub(imwrite_log):
     cv2 = types.ModuleType("cv2")
     cv2.COLOR_BGR2RGB = 4
@@ -370,12 +381,18 @@ def _make_ultralytics_stub():
 def _make_requests_stub():
     req = types.ModuleType("requests")
     req.posts = []
+    req.gets = []
 
     def post(url, json=None, timeout=None, headers=None):
         req.posts.append({"url": url, "json": json, "headers": headers})
         return _FakeResponse()
 
+    def get(url, params=None, timeout=None, headers=None):
+        req.gets.append({"url": url, "params": params, "headers": headers})
+        return _FakeGalleryResponse()
+
     req.post = post
+    req.get = get
     return req
 
 
@@ -390,11 +407,13 @@ def _make_face_id_stub(mode):
     mod = types.ModuleType("face_id")
     mod.calls = []
 
-    def identify_with_confidence(crop):
+    def identify_with_confidence(crop, gallery_entries=None):
         mean = float(crop.mean())
         mod.calls.append(mean)
         if mode == "named":
-            return ("Alice", 0.92) if mean < 100 else ("Bob", 0.88)
+            name, confidence = ("Alice", 0.92) if mean < 100 else ("Bob", 0.88)
+            allowed = {item.get("name") for item in (gallery_entries or [])}
+            return (name, confidence) if name in allowed else ("unknown", None)
         if mode == "unknown":
             return "unknown", None
         if mode == "forbidden":
@@ -431,6 +450,7 @@ def _two_person_boxes():
 def _load_multicamera(monkeypatch, *, face_mode="named", frames=3,
                       snapshot_dir="", privacy=False, recheck_frames=1,
                       event_interval="0", face_id_enabled=True,
+                      gallery_enabled=True,
                       boxes_seq=None, frame=None):
     """Load multicamera.py fresh with stubbed deps and a controlled env.
 
@@ -447,6 +467,11 @@ def _load_multicamera(monkeypatch, *, face_mode="named", frames=3,
     monkeypatch.setenv("WAMSS_IDENTITY_RECHECK_FRAMES", str(recheck_frames))
     monkeypatch.setenv("WAMSS_IDENTITY_RECHECK_SECONDS", "5.0")
     monkeypatch.setenv("WAMSS_SNAPSHOT_DIR", snapshot_dir)
+    if gallery_enabled:
+        monkeypatch.setenv("WAMSS_BACKEND_URL", "http://localhost:8000/event")
+    else:
+        monkeypatch.delenv("WAMSS_BACKEND_URL", raising=False)
+        monkeypatch.delenv("WAMSS_GALLERY_BASE_URL", raising=False)
     monkeypatch.delenv("WAMSS_ROOM_CALIB", raising=False)
     monkeypatch.delenv("WAMSS_PRIVACY_SNAPSHOT_DIR", raising=False)
 
@@ -520,12 +545,19 @@ def test_build_person_event_unknown_confidence_is_none(monkeypatch):
 def test_identify_crop_scored_uses_face_id(monkeypatch):
     loaded = _load_multicamera(monkeypatch, face_mode="named")
     frame = _two_person_frame()
-    assert loaded.mod._identify_crop_scored(frame, [10, 10, 50, 80]) == \
-        ("Alice", 0.92)
-    assert loaded.mod._identify_crop_scored(frame, [60, 10, 100, 80]) == \
-        ("Bob", 0.88)
+    assert loaded.mod._identify_crop_scored(
+        frame, [10, 10, 50, 80]) == ("unknown", None)
+    allowed = [
+        {"name": "Alice", "embedding": [1.0]},
+        {"name": "Bob", "embedding": [0.0]},
+    ]
+    assert loaded.mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=allowed) == ("Alice", 0.92)
+    assert loaded.mod._identify_crop_scored(
+        frame, [60, 10, 100, 80], gallery_entries=allowed) == ("Bob", 0.88)
     # Degenerate crop: no identification attempted.
-    assert loaded.mod._identify_crop_scored(frame, [50, 50, 50, 80]) == \
+    assert loaded.mod._identify_crop_scored(
+        frame, [50, 50, 50, 80], gallery_entries=allowed) == \
         ("unknown", None)
 
 
@@ -539,12 +571,13 @@ def test_identify_crop_scored_disabled_without_calling_face_id(monkeypatch):
 
 
 def test_identify_crop_scored_legacy_face_id(monkeypatch):
-    """A face_id without identify_with_confidence still works, with a
-    None confidence (the name-only identify() fallback)."""
+    """A legacy name-only matcher is refused because it cannot be restricted."""
     loaded = _load_multicamera(monkeypatch, face_mode="legacy")
     frame = _two_person_frame()
-    assert loaded.mod._identify_crop_scored(frame, [10, 10, 50, 80]) == \
-        ("Alice", None)
+    allowed = [{"name": "Alice", "embedding": [1.0]}]
+    assert loaded.mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=allowed) == ("unknown", None)
+    assert loaded.face_mod.calls == []
 
 
 # --------------------------------------------------------------------------
@@ -592,13 +625,13 @@ def test_run_camera_names_every_person(monkeypatch, tmp_path):
     assert posts[0]["json"]["dwell_seconds"] >= 0
     assert posts[0]["json"]["zone"] == "UNKNOWN"
 
-    # Both tracks got a first-sighting snapshot on the review queue.
-    assert posts[0]["json"]["snapshot_path"].startswith("snaps/Person_1_")
-    assert posts[1]["json"]["snapshot_path"].startswith("snaps/Person_2_")
+    # The camera loop does not write snapshots of people without consent.
+    assert all(post["json"]["snapshot_path"] is None for post in posts)
+    assert loaded.imwrite_log == []
 
 
-def test_run_camera_unknown_stays_unknown_with_snapshot(monkeypatch,
-                                                        tmp_path):
+def test_run_camera_unknown_stays_unknown_without_snapshot(monkeypatch,
+                                                           tmp_path):
     snap_dir = tmp_path / "snaps"
     boxes = [_two_person_boxes() for _ in range(3)]
     loaded = _load_multicamera(
@@ -613,9 +646,21 @@ def test_run_camera_unknown_stays_unknown_with_snapshot(monkeypatch,
         event = post["json"]
         assert event["person_name"] == "unknown"
         assert event["person_name_confidence"] is None
-        # Unknown tracks still get a snapshot for the review queue.
-        assert event["snapshot_path"] is not None
-        assert event["snapshot_path"].startswith("snaps/Person_")
+        assert event["snapshot_path"] is None
+    assert loaded.imwrite_log == []
+
+
+def test_run_camera_does_not_identify_without_camera_gallery(monkeypatch):
+    boxes = [_two_person_boxes() for _ in range(2)]
+    loaded = _load_multicamera(
+        monkeypatch, face_mode="named", frames=2, gallery_enabled=False,
+        boxes_seq=boxes)
+    loaded.mod.run_camera("CAM_01", "http://192.0.2.10:8080/video")
+
+    assert loaded.face_mod.calls == []
+    assert len(loaded.req.posts) == 4
+    assert all(post["json"]["person_name"] == "unknown"
+               for post in loaded.req.posts)
 
 
 # --------------------------------------------------------------------------

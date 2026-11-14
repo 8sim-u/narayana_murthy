@@ -36,6 +36,14 @@ interface StrainSummary {
   ml_stress_score?: number | null;
 }
 
+interface AppUsageItem {
+  employee_id: string;
+  machine_id: string;
+  app_name: string;
+  category: "work" | "break" | "neutral";
+  minutes: number;
+}
+
 const STRAIN_COLORS: Record<string, string> = {
   green: "var(--ok)",
   amber: "var(--warn)",
@@ -62,8 +70,10 @@ function minutesBetween(start: string, end: string): number {
 export default function EmployeeActivity({ officeId = "" }: { officeId?: string }) {
   const [records, setRecords] = useState<ActivityRecord[]>([]);
   const [strain, setStrain] = useState<StrainSummary[]>([]);
+  const [appUsage, setAppUsage] = useState<AppUsageItem[]>([]);
   const [employeeId, setEmployeeId] = useState("");
   const [machineId, setMachineId] = useState("");
+  const [appUsageDay, setAppUsageDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [idleThresholdMin, setIdleThresholdMin] = useState(15);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -77,14 +87,19 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
       if (machineId) params.set("machine_id", machineId);
       if (officeId) params.set("office_id", officeId);
       params.set("limit", "500");
-      const [actRes, strainRes] = await Promise.all([
+      const usageParams = new URLSearchParams(params);
+      usageParams.set("day", appUsageDay);
+      const [actRes, strainRes, usageRes] = await Promise.all([
         fetch(`${API_URL}/activity?${params.toString()}`),
         fetch(`${API_URL}/activity/strain-summary`),
+        fetch(`${API_URL}/activity/app-usage?${usageParams.toString()}`),
       ]);
       if (!actRes.ok) throw new Error(`activity: HTTP ${actRes.status}`);
       if (!strainRes.ok) throw new Error(`strain-summary: HTTP ${strainRes.status}`);
+      if (!usageRes.ok) throw new Error(`app-usage: HTTP ${usageRes.status}`);
       setRecords(await actRes.json());
       setStrain(await strainRes.json());
+      setAppUsage(await usageRes.json());
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load activity data");
     } finally {
@@ -97,24 +112,14 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
     const t = setInterval(() => { void fetchData(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [officeId]);
+  }, [officeId, employeeId, machineId, appUsageDay]);
 
   const activityRows = useMemo(
     () => records.filter((r) => r.event_type === "activity"),
     [records]
   );
 
-  const appUsage = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const r of activityRows) {
-      if (r.is_idle) continue;
-      const name = r.app_name || "(unknown)";
-      map.set(name, (map.get(name) || 0) + minutesBetween(r.start_time, r.end_time));
-    }
-    return [...map.entries()].sort((a, b) => b[1] - a[1]);
-  }, [activityRows]);
-
-  const maxAppMin = appUsage.length > 0 ? appUsage[0][1] : 1;
+  const maxAppMin = appUsage.length > 0 ? Math.max(...appUsage.map((item) => item.minutes)) : 1;
 
   const idleStats = useMemo(() => {
     let idleMin = 0;
@@ -244,21 +249,27 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
 
       <div className="grid-2">
         <Reveal>
-          <section className="panel" aria-label="App Usage">
-            <SectionHead title="App Usage" meta="active minutes" />
+          <section className="panel" aria-label="Daily App Usage">
+            <div className="section-head">
+              <SectionHead title="Daily App Usage" meta="UTC active minutes" />
+              <Field label="UTC date">
+                <input className="input" type="date" value={appUsageDay} onChange={(e) => setAppUsageDay(e.target.value)} />
+              </Field>
+            </div>
             {loading && appUsage.length === 0 ? (
               <SkeletonRows rows={4} height={40} />
             ) : appUsage.length === 0 ? (
-              <EmptyState title="No active segments" body="App Usage builds up as agents report non-idle windows." />
+              <EmptyState title="No active segments" body="Daily app totals appear after agents report non-idle windows. Unmapped apps are neutral." />
             ) : (
               <ul className="spec-list">
-                {appUsage.slice(0, 8).map(([app, mins], i) => (
-                  <li key={app} className="rise-stagger" style={{ "--i": Math.min(i, 8) } as React.CSSProperties}>
-                    <span className="spec-term" style={{ minWidth: 150 }}>{app}</span>
+                {appUsage.map((item, i) => (
+                  <li key={`${item.employee_id}/${item.machine_id}/${item.app_name}/${item.category}`} className="rise-stagger" style={{ "--i": Math.min(i, 8) } as React.CSSProperties}>
+                    <span className="spec-term" style={{ minWidth: 150 }}>{item.app_name}</span>
                     <span style={{ flex: 1, minWidth: 120 }}>
-                      <Meter value={mins} max={maxAppMin} color="var(--ice)" label={`${app} ${mins.toFixed(1)} minutes`} />
+                      <Meter value={item.minutes} max={maxAppMin} color="var(--ice)" label={`${item.app_name} ${item.minutes.toFixed(1)} minutes`} />
                     </span>
-                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{mins.toFixed(1)} min</span>
+                    <span style={{ color: "var(--text-2)", fontSize: 12, minWidth: 54 }}>{item.category}</span>
+                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{item.minutes.toFixed(1)} min</span>
                   </li>
                 ))}
               </ul>
