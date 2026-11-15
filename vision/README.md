@@ -11,7 +11,10 @@ thresholds, and tracking parameters against a real feed.
 ## Files
 
 - `multicamera.py` - multi-camera tracker, the main entry point
-- `detection.py` - single-webcam detection demo
+- `detection.py` - FastAPI health service for the edge node on port 8001
+  (`GET /health` liveness, `GET /status` camera/backend/model/log status);
+  started with the same launcher pattern as the backend
+- `detection_demo.py` - single-webcam detection demo
 - `tracking.py` - single-webcam ByteTrack demo
 - `.env.example` - documented copy of every supported env var
 - `requirements.txt` - edge-node dependencies
