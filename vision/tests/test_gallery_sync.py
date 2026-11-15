@@ -66,12 +66,14 @@ class _FakeHttp:
         self._galleries = list(galleries)
         self._fail_version = fail_version
         self.calls = []
+        self.params_seen = []
         self._version_i = 0
         self._gallery_i = 0
 
-    def __call__(self, url, timeout=2.0, headers=None):
+    def __call__(self, url, timeout=2.0, headers=None, params=None):
         path = url.split("http://backend:8000")[-1]
         self.calls.append(path)
+        self.params_seen.append(dict(params) if params else None)
         if path.endswith("/faces/gallery/version"):
             if self._fail_version:
                 raise ConnectionError("backend down")
@@ -225,6 +227,30 @@ def test_version_failure_keeps_local_gallery(monkeypatch, tmp_path):
     assert refresher.maybe_refresh(1031.0) is True
     assert fake_face_id.reload_calls == 1
     assert "alice.json" in _sidecars(fake_face_id)
+
+
+def test_camera_scoped_fetch_sends_camera_id(monkeypatch, tmp_path):
+    mod, fake_face_id = _load_multicamera(monkeypatch, tmp_path)
+    http = _FakeHttp(versions=[1], galleries=[[_ALICE]])
+    refresher = mod.GalleryRefresher(
+        "http://backend:8000", 30.0, fake_face_id, http_get=http,
+        camera_id="CAM_01")
+
+    assert refresher.maybe_refresh(1000.0) is True
+    assert fake_face_id.reload_calls == 1
+    # The gallery fetch is camera-scoped; the version poll stays unscoped.
+    assert http.params_seen[0] is None
+    assert http.params_seen[1] == {"camera_id": "CAM_01"}
+
+
+def test_unscoped_fetch_sends_no_camera_id(monkeypatch, tmp_path):
+    mod, fake_face_id = _load_multicamera(monkeypatch, tmp_path)
+    http = _FakeHttp(versions=[1], galleries=[[_ALICE]])
+    refresher = mod.GalleryRefresher(
+        "http://backend:8000", 30.0, fake_face_id, http_get=http)
+
+    assert refresher.maybe_refresh(1000.0) is True
+    assert http.params_seen == [None, None]
 
 
 def test_unmatchable_entries_are_skipped(monkeypatch, tmp_path):
