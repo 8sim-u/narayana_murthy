@@ -5,10 +5,10 @@
 // state instead of an error. The registry carries no confidence score, so
 // none is shown here; wherever the vision pipeline reports a confidence
 // (events, room map), it is displayed next to the name.
-import { useCallback, useEffect, useState } from 'react';
-import { deleteIdentity, enrollFace, getIdentities, getUnknowns, snapshotUrl } from '../api';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { deleteIdentity, enrollFace, enrollFacePhoto, fetchEvents, getIdentities, getUnknowns, snapshotUrl } from '../api';
 import type { Identity, UnknownSighting } from '../types';
-import { Chip, EmptyState, ErrorNotice, SectionHead, SkeletonRows, formatClock } from './ui';
+import { Chip, EmptyState, ErrorNotice, Field, SectionHead, SkeletonRows, formatClock } from './ui';
 
 const POLL_MS = 10000;
 
@@ -210,6 +210,139 @@ export function UnknownPeoplePanel() {
   );
 }
 
+/* ------------------------- enroll by photo ------------------------------- */
+
+function EnrollPhotoPanel() {
+  const [name, setName] = useState('');
+  const [cameraId, setCameraId] = useState('');
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [enrolling, setEnrolling] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [enrolledNote, setEnrolledNote] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+
+  // Camera choices come from the live event ledger, the same source the
+  // header camera filter uses. No hardcoded camera ids.
+  const [cameras, setCameras] = useState<string[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const data = await fetchEvents(undefined, 100);
+        if (!alive) return;
+        const seen = new Set<string>();
+        for (const e of data) seen.add(e.camera_id);
+        setCameras([...seen].sort());
+      } catch {
+        // Camera choices are a convenience; the backend consent check stays
+        // the authority, so a failed lookup just leaves the list stale.
+      }
+    };
+    void load();
+    const id = window.setInterval(() => { void load(); }, 15000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, []);
+
+  useEffect(() => {
+    if (!cameraId && cameras.length > 0) setCameraId(cameras[0]);
+  }, [cameras, cameraId]);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setFormError('Type a name before enrolling.');
+      return;
+    }
+    if (!photo) {
+      setFormError('Choose a clear front-facing photo first.');
+      return;
+    }
+    if (!cameraId) {
+      setFormError('Choose the camera this person will be watched by.');
+      return;
+    }
+    setFormError(null);
+    setEnrolling(true);
+    try {
+      await enrollFacePhoto(trimmed, cameraId, photo);
+      setEnrolledNote(`Enrolled ${trimmed} for ${cameraId}. They are named on this camera from now on.`);
+      setName('');
+      setPhoto(null);
+      if (fileInput.current) fileInput.current.value = '';
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Enrollment failed.');
+    } finally {
+      setEnrolling(false);
+    }
+  };
+
+  return (
+    <section className="panel" aria-label="Enroll by photo">
+      <SectionHead title="Enroll by Photo" meta="one clear front-facing photo" />
+      {enrolledNote && (
+        <div className="notice notice-info" role="status">
+          <p>{enrolledNote}</p>
+        </div>
+      )}
+      {formError && (
+        <div className="notice notice-error" role="alert">
+          <p>{formError}</p>
+        </div>
+      )}
+      <form onSubmit={(e) => { void submit(e); }} style={{ display: 'grid', gap: 12, maxWidth: 460 }}>
+        <Field label="Name">
+          <input
+            className="input"
+            type="text"
+            placeholder="Who is this person?"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            aria-label="Name to enroll"
+            disabled={enrolling}
+          />
+        </Field>
+        <Field label="Camera">
+          <select
+            className="select"
+            value={cameraId}
+            onChange={(e) => setCameraId(e.target.value)}
+            aria-label="Camera to enroll the person on"
+            disabled={enrolling || cameras.length === 0}
+          >
+            {cameras.length === 0 ? (
+              <option value="">No cameras seen yet</option>
+            ) : (
+              cameras.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))
+            )}
+          </select>
+        </Field>
+        <Field label="Photo">
+          <input
+            ref={fileInput}
+            className="input"
+            type="file"
+            accept="image/*"
+            onChange={(e) => setPhoto(e.target.files?.[0] ?? null)}
+            aria-label="Front-facing photo to enroll"
+            disabled={enrolling}
+          />
+        </Field>
+        <div>
+          <button type="submit" className="btn btn-primary" disabled={enrolling}>
+            {enrolling ? 'Enrolling...' : 'Enroll'}
+          </button>
+        </div>
+        <p style={{ margin: 0, color: 'var(--text-3)', fontSize: 12.5 }}>
+          The backend stores the face only when the person has active camera consent, so enrollment fails without it.
+        </p>
+      </form>
+    </section>
+  );
+}
+
 /* ---------------------------- known people ------------------------------- */
 
 export function KnownPeopleList() {
@@ -329,13 +462,17 @@ export function KnownPeopleList() {
   );
 }
 
-/** Identity tab: the unknowns queue and the known people list side by side. */
+/** Identity tab: the unknowns queue, the enroll-by-photo form, and the
+ * known people list. */
 export default function IdentityPanels() {
   return (
     <div className="rise">
       <div className="grid-2">
         <UnknownPeoplePanel />
-        <KnownPeopleList />
+        <div style={{ display: 'grid', gap: 16 }}>
+          <EnrollPhotoPanel />
+          <KnownPeopleList />
+        </div>
       </div>
     </div>
   );
