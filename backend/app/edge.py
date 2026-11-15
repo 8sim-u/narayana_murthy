@@ -819,13 +819,68 @@ def _sanitize_name(name: str) -> str:
     return cleaned or "person"
 
 
+_INSIGHTFACE_APP: Any = None  # cached FaceAnalysis; False = unavailable
+
+
+def _insightface_app() -> Optional[Any]:
+    """Cached insightface FaceAnalysis, or None when unavailable.
+
+    The vision pipeline's consent-gallery matcher compares live ArcFace
+    embeddings against stored gallery vectors, so enrollment must encode
+    with the same family (buffalo_l ArcFace, normalized 512-d). One shared
+    instance is loaded lazily and reused; first use downloads the model
+    pack into ~/.insightface when it is not cached yet.
+    """
+    global _INSIGHTFACE_APP
+    if _INSIGHTFACE_APP is not None:
+        return _INSIGHTFACE_APP or None
+    try:
+        from insightface.app import FaceAnalysis  # type: ignore
+
+        app = FaceAnalysis(name="buffalo_l")
+        app.prepare(ctx_id=-1, det_size=(640, 640))
+        _INSIGHTFACE_APP = app
+        logger.info("insightface FaceAnalysis ready for face encoding")
+    except Exception as exc:
+        logger.warning(
+            "insightface unavailable for face encoding: %s", type(exc).__name__)
+        _INSIGHTFACE_APP = False
+    return _INSIGHTFACE_APP or None
+
+
 def _encode_face(image_bytes: bytes) -> Tuple[Optional[List[float]], bool]:
     """Try to compute a face embedding.
 
-    Returns (embedding_or_None, face_available). Never raises: any failure
+    Prefers insightface (ArcFace) so stored embeddings match what the
+    vision pipeline's consent gallery matcher compares against; falls back
+    to face_recognition when insightface is unavailable. Returns
+    (embedding_or_None, face_available). Never raises: any failure
     (library missing, no face found, bad image) yields the unavailable flag
     so enrollment never returns a 500.
     """
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+
+        app = _insightface_app()
+        if app is not None:
+            array = np.frombuffer(image_bytes, dtype=np.uint8)
+            image = cv2.imdecode(array, cv2.IMREAD_COLOR)
+            if image is not None:
+                faces = app.get(image)
+                if faces:
+                    best = max(
+                        faces,
+                        key=lambda f: (f.bbox[2] - f.bbox[0])
+                        * (f.bbox[3] - f.bbox[1]))
+                    return (
+                        [float(v) for v in best.normed_embedding],
+                        True,
+                    )
+                logger.warning("insightface found no face in enrollment photo")
+                return None, False
+    except Exception as exc:
+        logger.warning("insightface encoding failed: %s", type(exc).__name__)
     try:
         import face_recognition  # type: ignore
     except ImportError:

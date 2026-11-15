@@ -452,7 +452,7 @@ class GalleryRefresher:
     """
 
     def __init__(self, base_url, poll_seconds=30.0, face_id_module=None,
-                 http_get=None, privacy_mode=False):
+                 http_get=None, privacy_mode=False, camera_id=None):
         self.base_url = (base_url or "").rstrip("/")
         try:
             self.poll_seconds = float(poll_seconds)
@@ -461,6 +461,7 @@ class GalleryRefresher:
         self._face_id = face_id_module
         self._http_get = http_get  # injectable for tests; else requests.get
         self._privacy_mode = bool(privacy_mode)
+        self.camera_id = camera_id
         self._last_version = None
         self._last_poll = None
         self._managed = {}  # sidecar filename -> person name
@@ -502,10 +503,12 @@ class GalleryRefresher:
         self._last_version = version
         return True
 
-    def _get(self, path):
+    def _get(self, path, params=None):
         get = self._http_get if self._http_get is not None else requests.get
-        response = get(self.base_url + path, timeout=2.0,
-                       headers=_backend_headers())
+        kwargs = {"timeout": 2.0, "headers": _backend_headers()}
+        if params is not None:
+            kwargs["params"] = params
+        response = get(self.base_url + path, **kwargs)
         response.raise_for_status()
         return response
 
@@ -518,7 +521,11 @@ class GalleryRefresher:
         return version
 
     def _fetch_gallery(self):
-        data = self._get("/faces/gallery").json()
+        # The backend serves the gallery camera-scoped: without a camera_id
+        # the request is rejected as unprocessable, so sidecars only ever
+        # mirror the consent-filtered view of one camera.
+        params = {"camera_id": self.camera_id} if self.camera_id else None
+        data = self._get("/faces/gallery", params=params).json()
         if not isinstance(data, list):
             raise ValueError("gallery response is not a list")
         return data
@@ -644,12 +651,13 @@ class CameraGallery:
         ))
 
 
-def _build_gallery_refresher():
+def _build_gallery_refresher(camera_id=None):
     """Gallery sync for the non-privacy path, or None when disabled.
 
     Disabled when privacy mode is on, face recognition is off, no
     gallery base URL is configured, polling is set to 0, or face_id is
-    unavailable.
+    unavailable. The camera_id scopes the backend gallery fetch: the
+    endpoint is camera-scoped and rejects unscoped requests.
     """
     if PRIVACY_MODE or not FACE_ID_ENABLED:
         return None
@@ -658,7 +666,8 @@ def _build_gallery_refresher():
     if _face_id is None:
         return None
     return GalleryRefresher(GALLERY_BASE_URL, GALLERY_POLL_SECONDS,
-                            _face_id, privacy_mode=PRIVACY_MODE)
+                            _face_id, privacy_mode=PRIVACY_MODE,
+                            camera_id=camera_id)
 
 
 def _build_person_event(camera_id, track_key, person_name, name_confidence,
@@ -829,7 +838,7 @@ def run_camera(camera_id, stream_url):
     # Gallery sync: dashboard enrollments reach this node without a restart.
     # None when disabled; never built in privacy mode (run_camera_privacy is
     # a separate loop that never touches it).
-    gallery_refresher = _build_gallery_refresher()
+    gallery_refresher = _build_gallery_refresher(camera_id)
 
     if not cap.isOpened():
         print(f"[{camera_id}] ERROR: Cannot open camera stream")

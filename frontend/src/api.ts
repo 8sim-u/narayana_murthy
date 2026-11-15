@@ -156,6 +156,20 @@ export async function enrollFace(name: string, snapshotPath: string, cameraId: s
   return handleResponse<unknown>(res);
 }
 
+// POST /faces/enroll with an uploaded photo (multipart). Same consent gate:
+// the backend checks active employee consent for the camera before storing.
+export async function enrollFacePhoto(name: string, cameraId: string, photo: File): Promise<unknown> {
+  const form = new FormData();
+  form.append('name', name);
+  form.append('camera_id', cameraId);
+  form.append('photo', photo);
+  const res = await fetch(`${API_URL}/faces/enroll`, {
+    method: 'POST',
+    body: form,
+  });
+  return handleResponse<unknown>(res);
+}
+
 // DELETE /faces/{name} -> remove an enrolled person from the registry.
 export async function deleteIdentity(name: string): Promise<unknown> {
   const res = await fetch(`${API_URL}/faces/${encodeURIComponent(name)}`, {
