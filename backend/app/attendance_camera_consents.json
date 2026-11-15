@@ -3,6 +3,6 @@
     "consented": true,
     "recorded_at": "2026-11-15T16:35:00+05:30",
     "revoked_at": null,
-    "camera_ids": ["CAM_01"]
+    "camera_ids": ["CAM_01", "CAM_02"]
   }
 }
