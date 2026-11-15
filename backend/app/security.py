@@ -32,6 +32,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.employee_auth import (
+    ensure_employee_match,
+    require_employee,
+    require_employee_or_service,
+)
 from app.alerts import dispatch_alert
 from app.security_models import SecurityEvent
 
@@ -261,8 +266,15 @@ def _write_threshold_mb() -> float:
 
 
 @router.post("/events", response_model=SecurityIngestResponse, status_code=status.HTTP_201_CREATED)
-def ingest_security_events(batch: SecurityEventsBatch, db: Session = Depends(get_db)):
-    """Batch ingest of workstation security/DLP signal events."""
+def ingest_security_events(
+    batch: SecurityEventsBatch,
+    db: Session = Depends(get_db),
+    authenticated_employee_id: Optional[str] = Depends(require_employee_or_service),
+):
+    """Ingest employee-bound events or explicitly authorized service batches."""
+    if authenticated_employee_id is not None:
+        for event in batch.events:
+            ensure_employee_match(event.employee_id, authenticated_employee_id)
     rows = [
         SecurityEvent(
             machine_id=ev.machine_id,
@@ -318,11 +330,14 @@ def get_security_alerts(
     office_id: Optional[str] = Query(None, description="Filter by office ID (e.g. hq, branch-north)"),
     hours: int = Query(24, ge=1, le=720, description="Lookback window in hours"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """
     Return flagged security anomalies for events in the last `hours` hours,
     newest first. Filters are optional.
     """
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     try:
         query = db.query(SecurityEvent).filter(SecurityEvent.timestamp >= cutoff)

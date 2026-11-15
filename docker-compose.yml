@@ -19,9 +19,22 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/wamss.db}
-      WAMSS_API_KEY: ${WAMSS_API_KEY:-}
+      WAMSS_API_KEY: ${WAMSS_API_KEY:?Set WAMSS_API_KEY to a non-placeholder secret in .env}
+      WAMSS_EMPLOYEE_TOKEN_HASHES: ${WAMSS_EMPLOYEE_TOKEN_HASHES:-}
+      WAMSS_MANAGER_ROSTER_TOKEN_HASHES: ${WAMSS_MANAGER_ROSTER_TOKEN_HASHES:-}
+      WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS: ${WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS:-0}
+      WAMSS_APP_CATEGORY_FILE: ${WAMSS_APP_CATEGORY_FILE:-/app/app/app_categories.json}
+      WAMSS_ATTENDANCE_ENABLED: ${WAMSS_ATTENDANCE_ENABLED:-0}
+      WAMSS_ATTENDANCE_MIN_CONFIDENCE: ${WAMSS_ATTENDANCE_MIN_CONFIDENCE:-0.5}
+      WAMSS_ATTENDANCE_DWELL_CAP_SEC: ${WAMSS_ATTENDANCE_DWELL_CAP_SEC:-300}
+      WAMSS_ATTENDANCE_IDENTITY_MAP: ${WAMSS_ATTENDANCE_IDENTITY_MAP:-/app/app/attendance_identity_map.json}
+      WAMSS_ATTENDANCE_CAMERA_CONSENT_FILE: ${WAMSS_ATTENDANCE_CAMERA_CONSENT_FILE:-/app/app/attendance_camera_consents.json}
+      WAMSS_CAMERA_PRIVACY_MODES: ${WAMSS_CAMERA_PRIVACY_MODES:-}
     volumes:
       - backend-data:/app/data
+      - ./backend/app/app_categories.json:/app/app/app_categories.json:ro
+      - ./backend/app/attendance_identity_map.json:/app/app/attendance_identity_map.json:ro
+      - ./backend/app/attendance_camera_consents.json:/app/app/attendance_camera_consents.json:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
       interval: 30s
@@ -38,8 +51,8 @@ services:
       - "8080:80"
     environment:
       # Key the nginx /api/ proxy attaches server-side (docs/AUTH.md).
-      # The browser never sees it. Empty when auth is disabled.
-      WAMSS_API_KEY: ${WAMSS_API_KEY:-}
+      # The browser never sees it; require the same key as the backend.
+      WAMSS_API_KEY: ${WAMSS_API_KEY:?Set WAMSS_API_KEY to a non-placeholder secret in .env}
     depends_on:
       backend:
         condition: service_healthy

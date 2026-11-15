@@ -1,4 +1,3 @@
-import { useRef } from 'react';
 import type { DetectionEvent } from '../types';
 import { snapshotUrl } from '../api';
 import { Chip, EmptyState, Meter, SkeletonRows } from './ui';
@@ -7,15 +6,20 @@ export function isRestrictedAlert(event: DetectionEvent): boolean {
   return event.decision === 'REVIEW_REQUIRED' || event.alerts.includes('RESTRICTED_ZONE_DETECTED');
 }
 
+// Short, sortable clock for the ledger: time only for today, date and time
+// otherwise. Kept in Commit Mono via the .num cell class.
 export function formatTimestamp(ts: string): string {
   const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
-}
-
-function confidenceTone(conf: number): string {
-  if (conf >= 0.8) return 'var(--ok)';
-  if (conf >= 0.5) return 'var(--warn)';
-  return 'var(--bad)';
+  if (Number.isNaN(d.getTime())) return ts;
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+  return d.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 export function isKnownPerson(name: string | null | undefined): boolean {
@@ -23,11 +27,6 @@ export function isKnownPerson(name: string | null | undefined): boolean {
 }
 
 export default function EventsTable({ events, loading }: { events: DetectionEvent[]; loading: boolean }) {
-  // Only play the sheet-row entrance once per data batch, not on every poll.
-  const batchRef = useRef<string>('');
-  const key = events.length > 0 ? String(events[0].id) : 'empty';
-  if (batchRef.current !== key) batchRef.current = key;
-
   if (loading && events.length === 0) {
     return <SkeletonRows rows={6} height={52} />;
   }
@@ -36,13 +35,13 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
     return (
       <EmptyState
         title="No events yet"
-        body="Vision events will stream in here as cameras report detections. Use the injector below to send a test event."
+        body="No detections have arrived from any camera. Either no cameras are connected to the backend, or the vision pipeline has not produced detections yet. Real events will appear here the moment cameras report."
       />
     );
   }
 
   return (
-    <div className="table-wrap">
+    <div className="table-wrap ledger-scroll">
       <table className="ledger">
         <thead>
           <tr>
@@ -60,18 +59,17 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
           </tr>
         </thead>
         <tbody>
-          {events.map((e, i) => {
+          {events.map((e) => {
             const alert = isRestrictedAlert(e);
             const unknown = !isKnownPerson(e.person_name);
             return (
+              // Keyed by the event id only: live refresh updates cells in
+              // place and never remounts or reorders rows under the cursor.
               <tr
-                key={`${batchRef.current}-${e.id}`}
-                className={`sheet-row${alert ? ' row-alert' : ''}`}
+                key={e.id}
+                className={alert ? 'row-alert' : undefined}
                 style={
-                  {
-                    '--i': Math.min(i, 24),
-                    ...(unknown && !alert ? { backgroundColor: 'var(--cloud)' } : {}),
-                  } as React.CSSProperties
+                  unknown && !alert ? { backgroundColor: 'var(--cloud)' } : undefined
                 }
               >
                 <td className="num">{e.id}</td>
@@ -122,13 +120,17 @@ export default function EventsTable({ events, loading }: { events: DetectionEven
                 <td>{e.objects.join(', ')}</td>
                 <td>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-                    <Meter value={e.confidence} max={1} color={confidenceTone(e.confidence)} label={`Confidence ${e.confidence.toFixed(2)}`} />
+                    <Meter value={e.confidence} max={1} color="var(--ink)" label={`Confidence ${e.confidence.toFixed(2)}`} />
                     <span className="num">{e.confidence.toFixed(2)}</span>
                   </span>
                 </td>
-                <td><Chip tone={e.zone === 'RESTRICTED' ? 'bad' : 'idle'}>{e.zone}</Chip></td>
                 <td>
-                  <Chip tone={e.decision === 'REVIEW_REQUIRED' ? 'warn' : 'ok'}>{e.decision}</Chip>
+                  <Chip tone={e.zone === 'RESTRICTED' ? 'bad' : 'idle'}>{e.zone}</Chip>
+                </td>
+                <td>
+                  {/* Colour means state here: amber only for review, quiet
+                      neutral for the ordinary no-rule case. */}
+                  <Chip tone={e.decision === 'REVIEW_REQUIRED' ? 'warn' : 'idle'}>{e.decision}</Chip>
                 </td>
                 <td className="id">{e.alerts.length > 0 ? e.alerts.join(', ') : '-'}</td>
               </tr>

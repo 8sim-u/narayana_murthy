@@ -19,16 +19,17 @@ Usage:
     # dry run: show what would be posted, send nothing
     python3 shared/simulate.py --dry-run
 
-    # seed 5 employees x 7 days against the local backend
-    python3 shared/simulate.py
+    # For employee-bound writes, provide per-employee credentials in a secret
+    # environment variable (JSON object keyed by E001, E002, ...):
+    # WAMSS_SIMULATOR_EMPLOYEE_TOKENS='{"E001":"...","E002":"..."}' python3 shared/simulate.py
+    # Or explicitly enable trusted service ingestion on the backend and here:
+    # WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS=1 WAMSS_API_KEY=... python3 shared/simulate.py
 
     # custom scale and target
     python3 shared/simulate.py --employees 10 --days 14 \\
         --api-url http://192.0.2.10:8000 --seed 42
 
-    # against a backend with API key auth enabled (docs/AUTH.md):
-    # the key comes from --api-key or the WAMSS_API_KEY environment variable
-    WAMSS_API_KEY=<your-deployment-key> python3 shared/simulate.py
+    # If API-key auth is enabled, also provide WAMSS_API_KEY (or --api-key).
 
 The backend must be running first (see docs/LOCAL_SETUP.md).
 """
@@ -77,11 +78,13 @@ def iso(dt: datetime) -> str:
 
 
 def post_json(url: str, payload: dict, timeout: float = 15.0,
-             api_key: str = "") -> dict:
+             api_key: str = "", employee_token: str = "") -> dict:
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if api_key:
         headers["X-API-Key"] = api_key
+    if employee_token:
+        headers["X-Employee-Token"] = employee_token
     req = urllib.request.Request(
         url, data=data,
         headers=headers,
@@ -234,6 +237,35 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate employee ID")
+        result[key] = value
+    return result
+
+
+def _simulator_employee_tokens() -> dict[str, str]:
+    """Load E001 -> raw token map from the simulator's protected environment."""
+    raw = os.environ.get("WAMSS_SIMULATOR_EMPLOYEE_TOKENS", "")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("WAMSS_SIMULATOR_EMPLOYEE_TOKENS must be a JSON object") from exc
+    if not isinstance(value, dict) or any(
+        not isinstance(employee_id, str)
+        or not employee_id.strip()
+        or not isinstance(token, str)
+        or not token
+        for employee_id, token in value.items()
+    ):
+        raise RuntimeError("WAMSS_SIMULATOR_EMPLOYEE_TOKENS must map employee IDs to non-empty tokens")
+    return value
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     rng = random.Random(args.seed)
@@ -247,6 +279,25 @@ def main(argv=None) -> int:
     security_total = 0
 
     try:
+        employee_tokens = _simulator_employee_tokens() if not args.dry_run else {}
+        employee_ids = [f"E{i + 1:03d}" for i in range(args.employees)]
+        service_access = os.environ.get(
+            "WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS", ""
+        ).strip().lower() in {"1", "true", "yes"}
+        if not args.dry_run and employee_tokens:
+            missing = [eid for eid in employee_ids if eid not in employee_tokens]
+            if missing:
+                raise RuntimeError(
+                    "WAMSS_SIMULATOR_EMPLOYEE_TOKENS is missing: " + ", ".join(missing)
+                )
+        elif not args.dry_run and employee_ids and not service_access:
+            raise RuntimeError(
+                "Set per-employee WAMSS_SIMULATOR_EMPLOYEE_TOKENS or explicitly enable "
+                "WAMSS_EMPLOYEE_INGESTION_SERVICE_ACCESS for a trusted service."
+            )
+        if not args.dry_run and employee_ids and service_access and not employee_tokens and not api_key:
+            raise RuntimeError("Trusted service ingestion requires WAMSS_API_KEY")
+
         # vision events are team-wide: post once per day, not per employee
         for day in days:
             for ev in gen_vision_events(rng, day, args.vision_per_day):
@@ -266,14 +317,20 @@ def main(argv=None) -> int:
                 for j in range(0, len(records), 100):
                     batch = {"records": records[j:j + 100]}
                     if not args.dry_run:
-                        post_json(f"{api}/activity", batch, api_key=api_key)
+                        post_json(
+                            f"{api}/activity", batch, api_key=api_key,
+                            employee_token=employee_tokens.get(eid, ""),
+                        )
                     activity_total += len(batch["records"])
 
                 # security events
                 sec = gen_security(rng, eid, mid, day)
                 if sec:
                     if not args.dry_run:
-                        post_json(f"{api}/security/events", {"events": sec}, api_key=api_key)
+                        post_json(
+                            f"{api}/security/events", {"events": sec}, api_key=api_key,
+                            employee_token=employee_tokens.get(eid, ""),
+                        )
                     security_total += len(sec)
 
             print(f"seeded {eid} ({mid}): {len(days)} workdays", flush=True)

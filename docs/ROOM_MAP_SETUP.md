@@ -41,10 +41,10 @@ Steps:
 2. **Measure their real positions.** Pick an origin (e.g. the corner of the
    room nearest the camera) and two axes along the walls. Measure each
    point's `(x, y)` in meters with a tape measure.
-3. **Read their pixel positions.** Open a snapshot from the camera (the
-   detector saves snapshots; see `GET /snapshots/{file}`) and note the
-   `(px, py)` pixel coordinates of each point. Pixel `(0, 0)` is the
-   top-left of the image.
+3. **Read their pixel positions locally.** Use the detector's local preview or
+   an image captured and authorized on the edge node; the server snapshot route
+   is disabled because it exposes person-level data. Note each point's `(px,
+   py)` pixel coordinates. Pixel `(0, 0)` is the top-left of the image.
 4. **Write the calibration JSON.** `vision/room_calib.py` has
    `save_calibration_template()`, which writes a template JSON with the
    right shape. Fill in your measured values:
@@ -78,19 +78,20 @@ positions are not comparable on the same map.
 
 Restart the detector process after adding or editing the file.
 
-## Verifying on the Room Map tab
+## Verifying calibration locally
 
-1. Open the dashboard and go to the Room Map tab.
-2. Walk to a known spot in the room (e.g. exactly 2 meters from the origin
-   corner along the X wall).
-3. Check that your dot lands near `(2.0, <your Y>)` on the map.
-4. If the dot is mirrored or rotated, your world axes are flipped: swap or
-   negate the world coordinates in the JSON and retry. If positions are
-   wildly off, one of the 4 points is probably mis-measured; re-measure.
+1. Use the detector's local preview and a known spot in the room (e.g. exactly
+   2 meters from the origin corner along the X wall).
+2. Check the locally reported coordinate is near `(2.0, <your Y>)`.
+3. If the point is mirrored or rotated, swap or negate the world coordinates
+   in the JSON and retry. If positions are wildly off, re-measure the four
+   calibration points.
 
-Sanity check without walking: the detector log or `GET /positions` should
-show values in a plausible meter range (e.g. `0..6`) instead of `0..1`
-fractions.
+The unscoped Room Map, `/positions`, and snapshot reads remain disabled. The
+Issue 19 manager token authorizes only roster-scoped wellness check-in prompts;
+it does not grant access to these broader records. For a no-walk sanity check,
+inspect local detector logs for plausible meter values (e.g.
+`0..6`) instead of normalized `0..1` fractions.
 
 ## Tips
 

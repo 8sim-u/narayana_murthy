@@ -17,7 +17,7 @@ from app.auth import (
     build_api_key_headers,
 )
 
-TEST_KEY = "wamss-test-key-12345"
+TEST_KEY = "wamss-test-key-12345"  # gitleaks:allow
 
 
 def make_app(**middleware_kwargs):

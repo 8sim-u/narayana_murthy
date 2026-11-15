@@ -62,6 +62,24 @@ export interface PersonPosition {
   last_seen: string;
 }
 
+// Geofence polygons are shared configuration; transition history is employee-private.
+// Polygon coordinates use normalized per-camera room-map space (0..1).
+export type GeofencePoint = [number, number];
+
+export interface GeofenceZone {
+  id: number;
+  camera_id: string;
+  name: string;
+  polygon: GeofencePoint[];
+}
+
+export interface GeofenceEvent {
+  zone_name: string;
+  transition: 'entry' | 'exit';
+  person_name: string;
+  timestamp: string;
+}
+
 // GET /heatmap -> density samples for the heatmap overlay.
 // x and y are normalized room coordinates in [0, 1].
 export interface HeatPoint {

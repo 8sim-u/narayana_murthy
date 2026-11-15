@@ -16,17 +16,22 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.database import get_db, init_db
 from app.auth import APIKeyAuthMiddleware
-from app.models import DetectionEvent
+from app.camera_consent import camera_mode, consented_employee_id_for_name
+from app.models import AggregateOccupancyEvent, DetectionEvent
 from app.rules import RuleEngine
-from app.schemas import EventCreate, EventDetail, EventResponse
+from app.schemas import AggregateOccupancyCreate, EventCreate, EventDetail, EventResponse
 
 # Workstation activity / presence / focus / security / policy routers.
 # The model imports must run before init_db() so Base.metadata.create_all
 # creates the new tables.
 from app import activity_models  # noqa: F401 - registers ActivityLog
 from app import security_models  # noqa: F401 - registers SecurityEvent
-from app.activity import router as activity_router
-from app.edge import ensure_schema, record_identity_sighting, record_position
+from app import wellness_models  # noqa: F401 - registers private wellness tables
+from app.activity import ensure_activity_schema, router as activity_router
+from app.attendance import router as attendance_router
+from app.edge import (
+    ensure_schema, process_geofence_position, record_identity_sighting, record_position,
+)
 from app.edge import router as edge_router
 from app.focus import router as focus_router
 from app.presence import router as presence_router
@@ -35,6 +40,9 @@ from app.policy import router as policy_router
 from app.exports import router as exports_router
 from app.analytics import router as analytics_router
 from app.hours import router as hours_router
+from app.wellness import (
+    router as wellness_router, start_live_sample_expirer, stop_live_sample_expirer,
+)
 
 logger = logging.getLogger("wamss.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -72,9 +80,14 @@ class AccessLogAndErrorHandlerMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     # Initialize database tables on application startup
     init_db()
+    ensure_activity_schema()
     # Additive edge columns for databases created before the edge expansion
     ensure_schema()
-    yield
+    start_live_sample_expirer()
+    try:
+        yield
+    finally:
+        stop_live_sample_expirer()
 
 
 app = FastAPI(
@@ -103,6 +116,7 @@ app.add_middleware(
 )
 
 app.include_router(activity_router)
+app.include_router(attendance_router)
 app.include_router(edge_router)
 app.include_router(focus_router)
 app.include_router(presence_router)
@@ -111,6 +125,7 @@ app.include_router(policy_router)
 app.include_router(exports_router)
 app.include_router(analytics_router)
 app.include_router(hours_router)
+app.include_router(wellness_router)
 
 
 @app.get("/health")
@@ -142,12 +157,82 @@ def get_health_db(db: Session = Depends(get_db)):
         )
 
 
+@app.post("/event/aggregate", status_code=status.HTTP_201_CREATED)
+def receive_aggregate_event(event_in: AggregateOccupancyCreate, db: Session = Depends(get_db)):
+    """Persist only camera-level occupancy counts in a separate aggregate table."""
+    if camera_mode(event_in.camera_id) != "aggregate":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Aggregate events are accepted only for aggregate-mode cameras",
+        )
+    if (event_in.occupancy == "occupied") != (event_in.person_count > 0):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Aggregate occupancy must agree with the reported count",
+        )
+    db_event = AggregateOccupancyEvent(
+        camera_id=event_in.camera_id.strip(),
+        occupancy=event_in.occupancy,
+        person_count=event_in.person_count,
+        timestamp=datetime.now(timezone.utc),
+    )
+    try:
+        db.add(db_event)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("Failed to persist aggregate occupancy event: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to store aggregate occupancy event",
+        )
+    return {"received": True, "camera_id": db_event.camera_id}
+
+
 @app.post("/event", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
 def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
     """
     Ingests person detection events from the vision pipeline,
     evaluates configurable decision rules, and persists event data.
     """
+    # The backend is authoritative for a camera's privacy mode. A missing or
+    # malformed mode configuration is aggregate-only and cannot accept
+    # person-level events. Do not trust a client-supplied privacy flag alone.
+    if event_in.privacy_mode or camera_mode(event_in.camera_id) != "identity":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This camera accepts aggregate-only events; person events are disabled",
+        )
+
+    # Auth decision (documented, 2026-11-15): identity is stored only for a
+    # name that maps to exactly one employee with active consent for this
+    # camera. Anything else is stored downgraded as an anonymous detection:
+    # the name, the identification confidence, and the snapshot reference
+    # are dropped, but the detection itself (zone, objects, position,
+    # alerts) is still recorded so the vision pipeline keeps working for
+    # unrecognized people. Rejecting the event would lose the detection
+    # entirely and would make the anonymous feed unobservable. The
+    # downgraded event carries no employee_id, so it never enters the
+    # identity registry or geofence tracking.
+    person_name = event_in.person_name
+    employee_id = None
+    if (
+        isinstance(person_name, str)
+        and person_name.strip()
+        and person_name.strip().casefold() != "unknown"
+    ):
+        employee_id = consented_employee_id_for_name(
+            person_name, event_in.camera_id
+        )
+    if employee_id is None:
+        person_name = None
+        person_name_confidence = None
+        snapshot_path = None
+    else:
+        person_name = person_name.strip()
+        person_name_confidence = event_in.person_name_confidence
+        snapshot_path = event_in.snapshot_path
+
     # Evaluate configured decision rules
     rule_result = RuleEngine.evaluate(zone=event_in.zone, objects=event_in.objects)
 
@@ -162,11 +247,13 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
         decision=rule_result.decision,
         alerts=rule_result.alerts,
         timestamp=now_utc,
-        person_name=event_in.person_name,
-        person_name_confidence=event_in.person_name_confidence,
+        person_name=person_name,
+        employee_id=employee_id,
+        person_name_confidence=person_name_confidence,
         position_x=event_in.position_x,
         position_y=event_in.position_y,
-        snapshot_path=event_in.snapshot_path,
+        position_bounds=event_in.position_bounds,
+        snapshot_path=snapshot_path,
         dwell_seconds=event_in.dwell_seconds,
     )
 
@@ -192,6 +279,7 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
             x=db_event.position_x,
             y=db_event.position_y,
             person_name_confidence=db_event.person_name_confidence,
+            position_bounds=event_in.position_bounds,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(f"Position registry update failed: {type(exc).__name__}")
@@ -206,6 +294,23 @@ def receive_event(event_in: EventCreate, db: Session = Depends(get_db)):
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning(f"Identity registry update failed: {type(exc).__name__}")
+
+    # Geofence evaluation requires per-person coordinates and an ephemeral
+    # tracker key. Aggregate-only privacy events carry neither, so they are
+    # naturally excluded without weakening the vision privacy path.
+    try:
+        process_geofence_position(
+            db,
+            camera_id=db_event.camera_id,
+            track_id=db_event.track_id,
+            person_name=db_event.person_name,
+            employee_id=db_event.employee_id,
+            x=db_event.position_x,
+            y=db_event.position_y,
+            position_bounds=event_in.position_bounds,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"Geofence processing failed: {type(exc).__name__}")
 
     return EventResponse(
         received=True,
@@ -224,8 +329,19 @@ def list_events(
     end_time: Optional[datetime] = Query(None, description="Filter events before or at this UTC datetime"),
     db: Session = Depends(get_db),
 ):
-    """
-    Returns detection events in reverse chronological order with optional filtering and pagination.
+    """Return detection events in reverse chronological order.
+
+    Auth decision (documented, 2026-11-15): the event feed is an
+    operational view gated by the deployment API key when one is configured,
+    not by an employee token. Employee scoping stays on the personal routes
+    (activity, presence, attendance, analytics, focus, hours, policy,
+    security, wellness, geofence history, and the activity/focus CSV
+    exports). Legacy rows with NULL employee_id stay visible here and in
+    the events CSV: they are anonymous detections from before employee
+    attribution existed, and downgraded events are anonymous by design, so
+    scoping this feed to one employee would hide exactly the rows the
+    consent downgrade is meant to make observable, and no employee token
+    could ever reveal them.
     """
     try:
         query = db.query(DetectionEvent)
@@ -253,12 +369,16 @@ def list_events(
 
 
 @app.get("/events/{event_id}", response_model=EventDetail)
-def get_event(event_id: int, db: Session = Depends(get_db)):
-    """
-    Retrieves detailed information for a single detection event by its unique ID.
-    """
+def get_event(
+    event_id: int,
+    db: Session = Depends(get_db),
+):
+    """Retrieve one detection event by ID. Same auth as GET /events: the
+    deployment API key when configured, not an employee token."""
     try:
-        event = db.query(DetectionEvent).filter(DetectionEvent.id == event_id).first()
+        event = db.query(DetectionEvent).filter(
+            DetectionEvent.id == event_id,
+        ).first()
     except SQLAlchemyError as exc:
         logger.error(f"Database query error for event {event_id}: {type(exc).__name__}")
         raise HTTPException(

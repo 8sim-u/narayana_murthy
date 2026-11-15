@@ -1,7 +1,8 @@
 """Face recognition for the WAMSS edge node (Workstream 1: Vision).
 
-identify(crop_bgr) returns an enrolled person name, or "unknown" when no
-match is found or no face-recognition backend is available.
+Matching requires a non-empty gallery explicitly supplied by the caller. In
+production, this must be the backend-filtered gallery for the active camera;
+omitting it always returns "unknown".
 
 Backend priority, chosen lazily on first use:
   1. insightface (FaceAnalysis, buffalo_l pack) when importable and its
@@ -17,11 +18,12 @@ when OpenCV itself is missing. The pipeline calls identify() only on the
 non-privacy path; privacy mode never imports this module (see the privacy
 guarantee in vision/multicamera.py).
 
-Gallery layout (vision/faces/):
+Legacy gallery layout (vision/faces/):
   <sanitized_name>.json -> {"name": ..., "method": "insightface"|"lbph",
                              "embedding": [...], "enrolled_at": ...}
-Use vision/enroll_face.py to create entries; it uses the same backend as
-identify() so the stored embedding always matches the runtime method.
+Local sidecars are not an authorization source. Vision enrollment forwards
+photos to the backend, and the active camera loop passes only the fresh,
+camera-scoped consent gallery to the matcher.
 """
 
 import json
@@ -41,6 +43,7 @@ _backend_ready = False
 _face_app = None       # insightface FaceAnalysis instance
 _lbph_rec = None       # cv2 LBPH recognizer
 _lbph_labels = {}      # int label -> enrolled name
+_lbph_filtered_cache = {}  # consent-filtered name set -> (model, labels)
 _lbph_size = (64, 64)  # width, height of the stored grayscale face patch
 _gallery = None        # cached list of gallery entry dicts
 
@@ -88,6 +91,7 @@ def reload_gallery():
     """Drop the cached gallery (and retrain LBPH) after a new enrollment."""
     global _gallery
     _gallery = None
+    _lbph_filtered_cache.clear()
     if _backend == "lbph" and _lbph_rec is not None:
         try:
             _train_lbph()
@@ -162,10 +166,11 @@ def _init_backend():
         if cv2 is None or not hasattr(cv2, "face"):
             raise RuntimeError(
                 "cv2.face is missing (install opencv-contrib-python)")
+        # Do not pre-train against an unrestricted gallery. The camera loop
+        # supplies its current consent-filtered entries to identify().
         _lbph_rec = cv2.face.LBPHFaceRecognizer_create()
-        _train_lbph()
         _backend = "lbph"
-        print("[face_id] backend: LBPH (opencv-contrib)")
+        print("[face_id] backend: LBPH (opencv-contrib; consent-filtered at match time)")
     except Exception as exc:
         print(f"[face_id] LBPH unavailable ({exc}); face recognition is "
               f"disabled, identify() will always return \"unknown\"")
@@ -209,19 +214,22 @@ def extract_embedding(image_bgr):
         return None
 
 
-def _identify_insightface_scored(crop_bgr):
+def _identify_insightface_scored(crop_bgr, gallery_entries=None):
     """(name, confidence) via insightface, or ("unknown", None).
 
     Confidence is the cosine similarity of the best gallery match
     (0..1 for a normalized embedding at or above the match threshold).
     """
+    if not gallery_entries:
+        return "unknown", None
     faces = _face_app.get(crop_bgr)
     if not faces:
         return "unknown", None
     best = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0])
                * (f.bbox[3] - f.bbox[1]))
     emb = [float(v) for v in best.normed_embedding]
-    entries = [e for e in _load_gallery()
+    source = gallery_entries or []
+    entries = [e for e in source
                if e.get("method") == "insightface" and e.get("embedding")]
     if not entries:
         return "unknown", None
@@ -234,19 +242,52 @@ def _identify_insightface_scored(crop_bgr):
     return name, float(max(0.0, min(1.0, score)))
 
 
-def _identify_lbph_scored(crop_bgr):
+def _filtered_lbph_model(entries):
+    """Train/cache an LBPH recognizer using only consent-eligible entries."""
+    try:
+        import numpy as np
+        if cv2 is None or not hasattr(cv2, "face"):
+            return None, {}
+        usable = [e for e in entries
+                  if e.get("method") == "lbph" and e.get("embedding")]
+        key = tuple(sorted(
+            (e["name"], hash(tuple(e["embedding"]))) for e in usable))
+        if not usable:
+            return None, {}
+        cached = _lbph_filtered_cache.get(key)
+        if cached is not None:
+            return cached
+        model = cv2.face.LBPHFaceRecognizer_create()
+        images = [np.array(e["embedding"], dtype="uint8").reshape(
+            _lbph_size[1], _lbph_size[0]) for e in usable]
+        labels = list(range(len(usable)))
+        label_names = {label: entry["name"]
+                       for label, entry in zip(labels, usable)}
+        model.train(images, np.array(labels))
+        _lbph_filtered_cache[key] = (model, label_names)
+        return model, label_names
+    except Exception:
+        return None, {}
+
+
+def _identify_lbph_scored(crop_bgr, gallery_entries=None):
     """(name, confidence) via LBPH, or ("unknown", None).
 
     LBPH reports a distance (smaller is a better match), so confidence is
     mapped linearly from the match threshold: 1.0 at distance 0, 0.0 at
     the threshold, clamped to 0..1.
     """
+    if not gallery_entries:
+        return "unknown", None
     patch = _largest_face_patch(crop_bgr)
     if patch is None:
         return "unknown", None
-    label, distance = _lbph_rec.predict(patch)
+    model, labels = _filtered_lbph_model(gallery_entries)
+    if model is None:
+        return "unknown", None
+    label, distance = model.predict(patch)
     threshold = float(os.environ.get("WAMSS_LBPH_THRESHOLD", "70"))
-    name = _lbph_labels.get(int(label))
+    name = labels.get(int(label))
     if name is None or distance > threshold:
         return "unknown", None
     if threshold <= 0:
@@ -255,17 +296,17 @@ def _identify_lbph_scored(crop_bgr):
     return name, float(max(0.0, min(1.0, confidence)))
 
 
-def identify(crop_bgr):
+def identify(crop_bgr, gallery_entries=None):
     """Return the enrolled person name for a BGR person crop, or "unknown".
 
     Never raises: missing backends, an empty gallery, no detectable face,
     or a bad crop all yield "unknown", so the pipeline keeps running.
     """
-    name, _confidence = identify_with_confidence(crop_bgr)
+    name, _confidence = identify_with_confidence(crop_bgr, gallery_entries)
     return name
 
 
-def identify_with_confidence(crop_bgr):
+def identify_with_confidence(crop_bgr, gallery_entries=None):
     """Return (name, confidence) for a BGR person crop.
 
     Confidence is a float in 0..1 when a face matched an enrolled person,
@@ -276,10 +317,12 @@ def identify_with_confidence(crop_bgr):
         _init_backend()
         if crop_bgr is None or getattr(crop_bgr, "size", 0) == 0:
             return "unknown", None
+        if not gallery_entries:
+            return "unknown", None
         if _backend == "insightface":
-            return _identify_insightface_scored(crop_bgr)
+            return _identify_insightface_scored(crop_bgr, gallery_entries)
         if _backend == "lbph":
-            return _identify_lbph_scored(crop_bgr)
+            return _identify_lbph_scored(crop_bgr, gallery_entries)
         return "unknown", None
     except Exception:
         return "unknown", None

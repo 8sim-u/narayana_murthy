@@ -8,6 +8,10 @@ from fastapi.testclient import TestClient
 if not os.environ.get("DATABASE_URL"):
     os.environ["DATABASE_URL"] = "sqlite:///./test_wamss.db"
 
+# Tests exercise normal person-event ingestion by default. Consent tests
+# replace this with exact camera policies and temporary employee records.
+os.environ["WAMSS_CAMERA_PRIVACY_MODES"] = '{"*":"identity"}'
+
 from app.database import init_db
 from app.main import app
 

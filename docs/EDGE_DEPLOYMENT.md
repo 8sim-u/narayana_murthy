@@ -38,7 +38,7 @@ addresses.
 | `CAMERA_STREAM_URL` | (none) | Camera source. A numeric string like `"1"` means a local webcam device index; anything else is treated as a URL (RTSP or MJPEG). See "Camera source options" below. |
 | `CAMERA_ID` | `CAM_01` | Identity of this node. Every event posted to the backend carries this value. Must be unique per node. |
 | `WAMSS_BACKEND_URL` | `http://127.0.0.1:8000/event` | Full URL of the backend `/event` endpoint that receives the node's events. Point it at the central backend machine (e.g. `http://192.168.1.20:8000/event`). |
-| `WAMSS_API_KEY` | (empty) | Only needed when the backend has API key auth enabled (`WAMSS_API_KEY` set on the backend, see `docs/AUTH.md`). The detector sends it as the `X-API-Key` header. Use a placeholder like `<your-key>` and never commit the real key. |
+| `WAMSS_API_KEY` | (empty) | Must match the backend key for identity-mode face-gallery access; if the backend key is unset or missing here, identity matching fails closed. The detector sends it as `X-API-Key`. Use a placeholder like `<your-key>` and never commit the real key. |
 
 Example for a node on the same LAN as the backend at `192.168.1.20`:
 
@@ -96,11 +96,12 @@ Keep it running: on a permanent edge node, run it under a process manager
 
 1. Watch the node log: it should print `[CAM_01] Camera connected` and then
    per-frame detection summaries when people walk into view.
-2. Check the central backend: open `GET /positions` (e.g.
-   `http://192.168.1.20:8000/positions` in a browser or with curl) and confirm
-   your `CAMERA_ID` shows up with live positions.
-3. Open the dashboard Room Map tab: the node should appear as a camera
-   source.
+2. Confirm the node reports successful event delivery in its logs and that
+   the backend receives the configured camera ID. Broad person-level map and
+   history views remain disabled; the Issue 19 manager token authorizes only
+   roster-scoped wellness check-in prompts, not these broader records.
+3. Do not use an unscoped dashboard map or person-history endpoint as a health
+   check; use the backend health endpoint and node delivery logs instead.
 
 If events arrive but positions are `0..1` decimals, the camera is
 uncalibrated. See `docs/ROOM_MAP_SETUP.md` to calibrate it to room meters.
@@ -148,38 +149,48 @@ CAMERA_STREAM_URL="http://192.168.1.61:8080/video" CAMERA_ID="PHONE_01" \
 ## Identity: remembering who a person is
 
 YOLO alone only says "a person is here", and ByteTrack ids (`Person 1`,
-`Person 2`, ...) live only while a person stays in view. Remembering *who*
-a person is comes from face recognition against an enrolled gallery, and
-that memory survives track-id changes, camera changes, and restarts.
+`Person 2`, ...) live only while a person stays in view. Face identification
+is separately gated by active, per-camera employee consent. Unlisted or
+malformed camera privacy-mode configuration is aggregate-only; a missing,
+ambiguous, or withdrawn consent never authorizes a name.
 
 ### Enrolling people
 
-Two ways, same result:
+Before enabling identity for a camera, configure the backend environment,
+for example `WAMSS_CAMERA_PRIVACY_MODES='{"CAM_01":"identity"}'`. Add the
+display-name-to-employee-ID mapping to
+`backend/app/attendance_identity_map.json` and an affirmative, camera-scoped
+record keyed by employee ID to `backend/app/attendance_camera_consents.json`:
 
-- **Command line, on the node or any machine with the repo:**
-  `python vision/enroll_face.py --photo <photo.jpg> --name "Full Name"`.
-  A clear front-facing photo works best. This writes an embedding sidecar
-  to `vision/faces/` (never commit those files; only `.gitkeep` and
-  `README.md` belong there). A node that is already running does **not**
-  pick up a CLI enrollment on its own: restart the node after enrolling
-  this way.
-- **Dashboard:** the Unknown people panel lists recent unknown sightings
-  with their first-sighting snapshot. Type a name next to one and it calls
-  `POST /faces/enroll {"name", "snapshot_path"}`, which stores the face in
-  the backend gallery and registry. The Known people panel lists everyone
-  enrolled, with last seen, and can remove someone (`DELETE /faces/{name}`).
+```json
+{"Employee Display Name":"employee-001"}
+```
 
-The backend is the source of truth for the gallery (embeddings live in its
-faces table). `GET /faces` lists enrolled people, `GET /identities` is the
-registry with last seen and sighting counts, `GET /unknowns` is the review
-queue, and `GET /faces/gallery` serves name plus embedding pairs for node
-sync.
+```json
+{"employee-001":{"consented":true,"recorded_at":"2026-11-14T10:00:00Z","camera_ids":["CAM_01"]}}
+```
+
+Enroll an authorized photo only through the backend (which checks the same
+camera scope before storage or encoding):
+
+```bash
+python vision/enroll_face.py --photo <photo.jpg> --name "Full Name" --camera-id CAM_01
+```
+
+The CLI does not write an unrestricted local gallery. `GET /faces/gallery`
+requires a configured, valid deployment API key plus `camera_id`, identity mode,
+and active consent; it returns only that camera's consented identities with
+usable embeddings. If API-key authentication is disabled or the key is missing,
+the endpoint fails closed. The running node refreshes this allow-list every
+`WAMSS_CONSENT_POLL_SECONDS` (default 1 second); a failed refresh empties the
+allow-list and disables identification. The camera loop also avoids writing
+first-sighting snapshots of unidentified people.
 
 ### How memory works
 
-- Every tracked person is identified, not just the first box in frame. One
-  event is posted per person per interval, each with its own `person_name`,
-  `person_name_confidence`, track id, position, and dwell time.
+- A face is matched only against the current camera-scoped consent gallery.
+  A name is emitted only if it remains authorized at event-send time; missing
+  consent or backend connectivity produces an anonymous event.
 - Identification runs on first sight of a track, then re-verifies
   periodically (every `WAMSS_IDENTITY_RECHECK_FRAMES` frames or
   `WAMSS_IDENTITY_RECHECK_SECONDS` seconds, whichever comes first;
@@ -192,25 +203,16 @@ sync.
   its name until another name wins a strict majority, so one bad frame, a
   tie, or a run of unknown votes cannot flip it. Unknown tracks stay
   `"unknown"` with a null confidence.
-- The long-term memory is the enrolled gallery, not the per-track cache: a
-  person who leaves and returns under a new track id is re-identified from
-  the gallery on first sight of the new track, on any camera.
-- Every new track gets a first-sighting snapshot (JPEG crop) whether it is
-  recognised or not, so unknown people land in the review queue.
+- The long-term memory is the backend gallery, filtered independently per
+  camera; one camera's consent does not authorize another camera.
+- When consent changes or a refresh fails, the vision node clears cached
+  per-track names. Withdrawal stops future matching and name storage; it
+  does not rewrite or delete historical events.
 
-### Gallery sync (no restart for dashboard enrollments)
-
-A running node polls `GET /faces/gallery/version` every
-`WAMSS_GALLERY_POLL_SECONDS` (default 30 s). When the version changes it
-re-fetches `GET /faces/gallery`, writes the entries as sidecars, and calls
-`face_id.reload_gallery()`, so a person enrolled on the dashboard is
-recognised within about 30 s without restarting any node. Sync is OFF
-unless a backend is explicitly configured: set `WAMSS_GALLERY_BASE_URL`,
-or set `WAMSS_BACKEND_URL` (the `/event` suffix is stripped). Any HTTP or
-disk failure is logged and the local gallery is kept. Sync never runs in
-privacy mode, and face recognition never runs in privacy mode
-(`WAMSS_PRIVACY_MODE=1`): the privacy loop has no track ids, no names, and
-no gallery fetch.
+`WAMSS_GALLERY_BASE_URL` or `WAMSS_BACKEND_URL` must point to the backend
+for identity matching. `WAMSS_PRIVACY_MODE=1` remains presence-only and
+never queries the gallery or identifies faces. An aggregate-only camera mode
+also rejects person-level events at backend ingestion.
 
 ### Thresholds
 
@@ -242,7 +244,10 @@ default thresholds.
   http://<backend-host>:8000/health`. If that fails, it is a network/firewall
   problem, not a detector problem. If health works but `/positions` never
   shows the node, check the node log for "Backend request failed" lines: a
-  401 means `WAMSS_API_KEY` is missing or wrong (see `docs/AUTH.md`).
+  401 means `WAMSS_API_KEY` is missing or wrong (see `docs/AUTH.md`). A `403`
+  from broad position, heatmap, identity, geofence-history, unknown-sighting, or
+  snapshot endpoints is intentional. The Issue 19 manager token is limited to
+  wellness check-in prompts and does not authorize these endpoints.
 - **Duplicate nodes on the dashboard:** two nodes share a `CAMERA_ID`. Give
   each node a unique id.
 - **High CPU on the node:** YOLO runs on CPU by default. Reduce the input
@@ -253,6 +258,10 @@ Note: the event payload carries `camera_id`, `track_id` (stable per person
 as `Person 1`, `Person 2`, ... via ByteTrack), `objects`, `confidence`,
 `zone`, `person_name` (when face recognition is enrolled), `position_x` /
 `position_y` (0..1 normalized, or meters when calibrated), `snapshot_path`,
-and `dwell_seconds`. The backend exposes these through `GET /positions`
-(live), `GET /heatmap`, `GET /occupancy`, `GET /snapshots/{file}`, and the
-face endpoints (`POST /faces/enroll`, `GET /faces`, `GET /faces/gallery`).
+and `dwell_seconds`. The deployment key is not employee or manager identity. Unscoped person-level
+position, geofence-history, heatmap, face-list, identity, unknown-sighting, and
+snapshot read endpoints are disabled. Personal event history must use the
+employee-token-scoped API; `GET /occupancy` returns counts only. Consent-filtered
+`GET /faces/gallery` and face enrollment/deletion require an enabled deployment
+API key, while gallery entries also require active camera-specific employee
+consent.

@@ -6,6 +6,8 @@ application wiring (include_router in main.py) is owned by the coordinator.
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 
 import pytest
 from fastapi import FastAPI
@@ -139,7 +141,16 @@ def security_client():
     engine.dispose()
 
 
-def test_ingest_and_alerts_roundtrip(security_client):
+def _employee_headers(monkeypatch, employee_id: str):
+    token = f"security-test-token:{employee_id}"
+    monkeypatch.setenv(
+        "WAMSS_EMPLOYEE_TOKEN_HASHES",
+        json.dumps({employee_id: hashlib.sha256(token.encode()).hexdigest()}),
+    )
+    return {"X-Employee-Token": token}
+
+
+def test_ingest_and_alerts_roundtrip(security_client, monkeypatch):
     now = datetime.now(timezone.utc)
     payload = {
         "events": [
@@ -159,11 +170,17 @@ def test_ingest_and_alerts_roundtrip(security_client):
             },
         ]
     }
-    r = security_client.post("/security/events", json=payload)
+    r = security_client.post(
+        "/security/events", json=payload,
+        headers=_employee_headers(monkeypatch, "EMP-9"),
+    )
     assert r.status_code == 201
     assert r.json()["received"] == 2
 
-    r = security_client.get("/security/alerts", params={"machine_id": "WS-9"})
+    r = security_client.get(
+        "/security/alerts", params={"machine_id": "WS-9"},
+        headers=_employee_headers(monkeypatch, "EMP-9"),
+    )
     assert r.status_code == 200
     alerts = r.json()
     assert len(alerts) == 2
@@ -173,7 +190,7 @@ def test_ingest_and_alerts_roundtrip(security_client):
     assert by_type["file_write_burst"]["severity"] == "medium"
 
 
-def test_alerts_filter_by_employee(security_client):
+def test_alerts_filter_by_employee(security_client, monkeypatch):
     now = datetime.now(timezone.utc)
     payload = {
         "events": [
@@ -186,15 +203,20 @@ def test_alerts_filter_by_employee(security_client):
             }
         ]
     }
-    security_client.post("/security/events", json=payload)
-    r = security_client.get("/security/alerts", params={"employee_id": "NOPE"})
+    headers = _employee_headers(monkeypatch, "EMP-A")
+    security_client.post("/security/events", json=payload, headers=headers)
+    forbidden = security_client.get(
+        "/security/alerts", params={"employee_id": "NOPE"}, headers=headers
+    )
+    assert forbidden.status_code == 403
+    r = security_client.get(
+        "/security/alerts", params={"employee_id": "EMP-A"}, headers=headers
+    )
     assert r.status_code == 200
-    assert r.json() == []
-    r = security_client.get("/security/alerts", params={"employee_id": "EMP-A"})
     assert len(r.json()) == 1
 
 
-def test_ingest_rejects_unknown_type(security_client):
+def test_ingest_rejects_unknown_type(security_client, monkeypatch):
     payload = {
         "events": [
             {
@@ -205,5 +227,8 @@ def test_ingest_rejects_unknown_type(security_client):
             }
         ]
     }
-    r = security_client.post("/security/events", json=payload)
+    r = security_client.post(
+        "/security/events", json=payload,
+        headers=_employee_headers(monkeypatch, "EMP-1"),
+    )
     assert r.status_code == 422

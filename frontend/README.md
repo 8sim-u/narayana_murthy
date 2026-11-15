@@ -22,8 +22,13 @@ Then open the URL printed by Vite (default `http://localhost:5173`).
 
 The backend base URL is read from `VITE_API_URL` (a Vite build-time env var).
 
-- **Local dev** (`npm run dev`): set `VITE_API_URL=http://localhost:8000`
-  (see `.env.example`) so the dev server talks to your local backend.
+- **Local dev** (`npm run dev`): the dev server proxies the same-origin
+  `/api/*` path to the backend (default `http://localhost:8000`, override
+  with `WAMSS_DEV_BACKEND_URL`). This mirrors the production nginx
+  topology. Set `WAMSS_DEV_EMPLOYEE_TOKEN` in the environment to have the
+  dev proxy attach an `X-Employee-Token` header for employee-scoped reads,
+  and `WAMSS_DEV_API_KEY` for the deployment key. Both are optional and
+  read from the process environment only. See `vite.config.ts`.
 - **Docker deployment**: leave `VITE_API_URL` empty (the default). The
   dashboard then calls the same-origin path `/api/*`, which the bundled
   nginx reverse-proxies to the backend with the API key attached

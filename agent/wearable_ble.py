@@ -8,8 +8,8 @@ Measurement characteristic (0x2A37), using the `bleak` library.
 The module is strictly optional:
   - Master switch is WAMSS_BLE_ENABLED (0/1, default 0).
   - If bleak is not installed, no adapter is present, or the device is not
-    found, the stream logs a warning and exposes available=False so the
-    caller falls back to heuristic-only strain scoring.
+    found, the stream exposes no private live sample; activity scoring remains
+    independent and work-pattern-only.
 
 Config (env vars, see agent/.env.example):
   WAMSS_BLE_ENABLED   "1" to enable, default "0" (disabled).
@@ -24,16 +24,20 @@ Heart Rate Measurement payload layout (Bluetooth SIG, characteristic
   byte 0: flags. bit 0 = 0 -> heart-rate value is an 8-bit uint in byte 1.
                   bit 0 = 1 -> heart-rate value is a 16-bit uint,
                   little-endian, in bytes 1-2.
-  Remaining bytes (energy expended, RR intervals) are ignored here.
+  Energy-expended bytes are skipped; RR intervals are used only in a bounded
+  in-memory window to calculate RMSSD. Raw RR intervals are never uploaded.
 
-This is a heuristic workload signal fed into the workstation strain score.
-It is NOT a medical measure of stress, fatigue, or heart health.
+This optional stream is private wellness telemetry. It is never blended into
+workstation strain scores or manager-visible alerts, and is NOT a medical
+measure of stress, fatigue, or heart health.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from collections import deque
 import os
 import threading
 import time
@@ -92,6 +96,30 @@ def parse_heart_rate(data: bytes | bytearray) -> Optional[int]:
     return bpm
 
 
+def parse_heart_rate_measurement(data: bytes | bytearray):
+    """Return (BPM, RR intervals in ms); never retain the raw packet."""
+    try:
+        buf = bytes(data)
+    except (TypeError, ValueError):
+        return None, []
+    bpm = parse_heart_rate(buf)
+    if bpm is None or len(buf) < (3 if buf[0] & 0x01 else 2):
+        return None, []
+    flags = buf[0]
+    offset = 3 if flags & 0x01 else 2
+    if flags & 0x08:  # Energy Expended field is present.
+        offset += 2
+    intervals = []
+    if flags & 0x10:  # RR-Interval values are 1/1024 second units.
+        while offset + 1 < len(buf):
+            value = int.from_bytes(buf[offset:offset + 2], byteorder="little")
+            rr_ms = value * 1000.0 / 1024.0
+            if 300.0 <= rr_ms <= 2000.0:
+                intervals.append(rr_ms)
+            offset += 2
+    return bpm, intervals
+
+
 def scan(timeout: float = 5.0) -> List[Dict[str, str]]:
     """
     Scan for BLE devices advertising the Heart Rate service (0x180D).
@@ -141,7 +169,7 @@ class HeartRateStream:
         stream.start()                      # reads WAMSS_BLE_DEVICE / callback from env
         ...
         bpm = stream.latest_bpm             # None until a reading arrives
-        if stream.available: ...            # False -> use heuristic-only scoring
+        if stream.available: ...            # False -> no private wearable sample
         stream.stop()
 
     The BLE work runs in a dedicated daemon thread with its own asyncio
@@ -164,6 +192,9 @@ class HeartRateStream:
         self._factory_is_default = client_factory is None
         self._client_factory = client_factory or (lambda addr: BleakClient(addr))
         self.latest_bpm: Optional[int] = None
+        self.latest_rmssd_ms: Optional[float] = None
+        self._rr_intervals = deque(maxlen=16)
+        self._last_rr_at: float = 0.0
         self.available: bool = False
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -171,13 +202,13 @@ class HeartRateStream:
 
     def latest_sample(self) -> Optional[Dict[str, float]]:
         """
-        Latest heart-rate reading as {"bpm": int, "ts": <epoch seconds>},
-        for the strain-fusion pipeline (round 4). None until a reading
-        arrives. Additive accessor; changes no existing behavior.
+        Latest private sample, or None when older than two minutes. RR intervals
+        stay in a bounded in-memory window; only derived RMSSD is exposed.
         """
-        if self.latest_bpm is None:
+        if self.latest_bpm is None or time.time() - self._last_reading_at > 120:
             return None
-        return {"bpm": self.latest_bpm, "ts": self._last_reading_at}
+        rmssd = self.latest_rmssd_ms if time.time() - self._last_rr_at <= 120 else None
+        return {"bpm": self.latest_bpm, "rmssd_ms": rmssd, "ts": self._last_reading_at}
 
     # ------------------------------------------------------------- control
 
@@ -213,18 +244,33 @@ class HeartRateStream:
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
+        self._clear_sample_state()
+
+    def _clear_sample_state(self) -> None:
+        """Discard cached readings so a later connection starts fresh."""
         self.available = False
+        self.latest_bpm = None
+        self.latest_rmssd_ms = None
+        self._rr_intervals.clear()
+        self._last_reading_at = 0.0
+        self._last_rr_at = 0.0
 
     # ------------------------------------------------------------- internals
 
     def _handle_notification(self, _sender: int, data: bytes | bytearray) -> None:
-        bpm = parse_heart_rate(data)
+        bpm, rr_intervals = parse_heart_rate_measurement(data)
         if bpm is None:
             logger.debug("Ignoring malformed heart-rate payload of %d bytes.", len(bytes(data)) if data is not None else 0)
             return
         self.latest_bpm = bpm
         self.available = True
         self._last_reading_at = time.time()
+        if rr_intervals:
+            self._rr_intervals.extend(rr_intervals)
+            self._last_rr_at = self._last_reading_at
+            if len(self._rr_intervals) >= 5:
+                differences = [b - a for a, b in zip(self._rr_intervals, list(self._rr_intervals)[1:])]
+                self.latest_rmssd_ms = round(math.sqrt(sum(d * d for d in differences) / len(differences)), 1)
         if self._on_bpm:
             try:
                 self._on_bpm(bpm)
@@ -268,9 +314,10 @@ class HeartRateStream:
                 except Exception:
                     pass
         except Exception as exc:
-            self.available = False
             logger.warning("BLE heart-rate connection failed (%s); retrying in %ss.",
                            exc, self._interval)
+        finally:
+            self._clear_sample_state()
 
     def _thread_main(self) -> None:
         asyncio.run(self._connect_loop())

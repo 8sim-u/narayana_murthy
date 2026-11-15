@@ -13,36 +13,60 @@ import PolicyView from './components/PolicyView';
 import TeamView from './components/TeamView';
 import AnalyticsTab from './components/AnalyticsTab';
 import RoomMapTab from './components/RoomMapTab';
+import IdentityPanels from './components/IdentityPanels';
+import GeofenceManager from './components/GeofenceManager';
+import WellnessDashboard from './components/WellnessDashboard';
+import ManagerCheckins from './components/ManagerCheckins';
 import OfficeSelector from './components/OfficeSelector';
 import ExportButton from './components/ExportButton';
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_LIMIT = 100;
 
-type Tab = 'events' | 'activity' | 'presence' | 'focus' | 'security' | 'policy' | 'team' | 'analytics' | 'roommap';
+type Tab =
+  | 'events'
+  | 'roommap'
+  | 'identity'
+  | 'activity'
+  | 'presence'
+  | 'focus'
+  | 'security'
+  | 'policy'
+  | 'team'
+  | 'trends'
+  | 'wellness'
+  | 'geofence';
 
+// Tab order follows DESIGN-DIRECTION.md: ordered by how often someone
+// uses them, one row, same header on every tab.
 const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
   { id: 'events', label: 'Vision Events', kicker: 'Camera network', blurb: 'Detection feed from every camera zone, refreshed live.' },
-  { id: 'activity', label: 'Activity', kicker: 'Workstation telemetry', blurb: 'Input telemetry, strain signals and app usage per machine.' },
-  { id: 'presence', label: 'Presence', kicker: 'Floor state', blurb: 'Camera sightings matched against workstation input.' },
-  { id: 'focus', label: 'Focus', kicker: 'Deep work', blurb: 'Daily deep-work scoring, streaks and break compliance.' },
-  { id: 'security', label: 'Security', kicker: 'Anomaly feed', blurb: 'USB, after-hours and write-burst anomaly feed.' },
-  { id: 'policy', label: 'Policy', kicker: 'Rules and privacy', blurb: 'Working-time rules, violation checks and privacy controls.' },
-  { id: 'team', label: 'Team', kicker: 'Aggregates', blurb: 'Focus, strain, break compliance and presence per team.' },
-  { id: 'analytics', label: 'Trends', kicker: 'Week over week', blurb: 'Weekly focus and strain movement.' },
-  { id: 'roommap', label: 'Room Map', kicker: 'Live floor plan', blurb: 'Tracked persons, dwell heatmap and occupancy timeline.' },
+  { id: 'roommap', label: 'Room Map', kicker: 'Live floor plan', blurb: 'Tracked persons, geofence zones and the occupancy timeline on one plan view.' },
+  { id: 'identity', label: 'Identity', kicker: 'Face registry', blurb: 'Unknown sightings waiting for a name, and the known people list with confidence.' },
+  { id: 'activity', label: 'Activity', kicker: 'Workstation telemetry', blurb: 'Per-person activity, idle time and strain. Input counts only, never keystroke content.' },
+  { id: 'presence', label: 'Presence', kicker: 'Floor state', blurb: 'Who is here now, and since when, matched across camera and workstation.' },
+  { id: 'focus', label: 'Focus', kicker: 'Deep work', blurb: 'The daily focus score with its inputs visible, streaks and break compliance.' },
+  { id: 'security', label: 'Security', kicker: 'Anomaly feed', blurb: 'USB, after-hours and write-burst anomalies. Every alert names its source.' },
+  { id: 'policy', label: 'Policy', kicker: 'Rules and privacy', blurb: 'What is collected, what is not, consent state and the 90-day retention purge.' },
+  { id: 'team', label: 'Team', kicker: 'Team aggregates', blurb: 'Focus, strain, break compliance and presence for the selected roster, aggregates only.' },
+  { id: 'trends', label: 'Trends', kicker: 'Personal weekly rollup', blurb: 'Your own week-over-week focus and strain movement, scoped to one person by design.' },
+  { id: 'wellness', label: 'Wellness', kicker: 'Private to the employee', blurb: 'Your private wellbeing view, plus supportive check-ins for authorized managers.' },
+  { id: 'geofence', label: 'Geofence', kicker: 'Zones and crossings', blurb: 'Draw zones on the camera map and review entry and exit crossings per zone.' },
 ];
 
 const PAGE_TITLES: Record<Tab, string> = {
   events: 'Vision Events',
+  roommap: 'Room Map',
+  identity: 'Identity',
   activity: 'Workstation Activity',
   presence: 'Presence',
   focus: 'Focus Score',
   security: 'Security Alerts',
   policy: 'Policy and Privacy',
-  team: 'Team view',
-  analytics: 'Trends',
-  roommap: 'Room Map',
+  team: 'Team',
+  trends: 'Trends',
+  wellness: 'Wellness',
+  geofence: 'Geofence',
 };
 
 function useClock(): string {
@@ -105,8 +129,8 @@ export default function App() {
               <circle cx="16" cy="16" r="9.5" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.45" />
             </svg>
             <span>
-              <span className="brand-name">WAMSS</span>
-              <span className="brand-tag" style={{ display: 'block' }}>Operations console</span>
+              <span className="brand-name">WAMSS Console</span>
+              <span className="brand-tag" style={{ display: 'block' }}>Workplace activity monitoring</span>
             </span>
           </div>
           <div className="masthead-right">
@@ -119,7 +143,7 @@ export default function App() {
         </div>
       </header>
 
-      <nav className="tabnav" aria-label="Dashboard sections">
+      <nav className="tabnav" aria-label="Console sections">
         <div className="tabnav-inner">
           {TABS.map((t) => (
             <button
@@ -181,18 +205,26 @@ export default function App() {
             </>
           )}
 
+          {tab === 'roommap' && <RoomMapTab />}
+          {tab === 'identity' && <IdentityPanels />}
           {tab === 'activity' && <EmployeeActivity officeId={officeId} />}
           {tab === 'presence' && <PresenceView officeId={officeId} />}
           {tab === 'focus' && <FocusWidget officeId={officeId} />}
           {tab === 'security' && <SecurityAlerts officeId={officeId} />}
           {tab === 'policy' && <PolicyView />}
           {tab === 'team' && <TeamView officeId={officeId} />}
-          {tab === 'analytics' && <AnalyticsTab />}
-          {tab === 'roommap' && <RoomMapTab />}
+          {tab === 'trends' && <AnalyticsTab />}
+          {tab === 'wellness' && (
+            <div className="wellness-stack">
+              <WellnessDashboard />
+              <ManagerCheckins />
+            </div>
+          )}
+          {tab === 'geofence' && <GeofenceManager />}
         </div>
 
         <footer className="footer-note">
-          Events refresh every {POLL_INTERVAL_MS / 1000}s &middot; Rows in amber or red need review
+          WAMSS Console &middot; every number here comes from the live backend API
         </footer>
       </main>
     </>

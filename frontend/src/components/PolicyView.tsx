@@ -95,6 +95,83 @@ export default function PolicyView() {
   return (
     <div className="rise">
       <Reveal>
+        <section className="panel" aria-label="What is collected">
+          <SectionHead title="What is collected, and what is not" meta="capture limits" />
+          <div className="grid-2">
+            <div>
+              <h3 className="section-title" style={{ fontSize: 15, margin: '0 0 10px' }}>Collected under the activity notice</h3>
+              <ul className="spec-list">
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>Camera detections</span>
+                  <span className="spec-def">Zone, tracked objects and a confidence value per camera. Snapshots only where the camera is configured for identity mode and consent is active.</span>
+                </li>
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>Workstation use</span>
+                  <span className="spec-def">Active segments with app name and window title, plus input counts and idle flags.</span>
+                </li>
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>Security signals</span>
+                  <span className="spec-def">USB device labels, byte totals and after-hours flags. Metadata only.</span>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="section-title" style={{ fontSize: 15, margin: '0 0 10px' }}>Never collected</h3>
+              <ul className="spec-list">
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>Keystroke content</span>
+                  <span className="spec-def">Key and click counts only. What is typed is never stored or shown anywhere in this console.</span>
+                </li>
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>File content</span>
+                  <span className="spec-def">Write bursts report megabytes moved, never file names or contents.</span>
+                </li>
+                <li>
+                  <span className="spec-term" style={{ minWidth: 160 }}>Wellness data</span>
+                  <span className="spec-def">Health entries need the employee's own separate opt-in and stay in their private view.</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </section>
+      </Reveal>
+
+      <Reveal>
+        <section className="panel" aria-label="Camera consent and privacy mode">
+          <SectionHead title="Camera consent and privacy mode" meta="enforced by the backend, fail closed" />
+          <ul className="spec-list">
+            <li>
+              <span className="spec-term">Privacy mode</span>
+              <span className="spec-def">
+                A camera accepts person-level events only when the backend explicitly
+                configures it for identity mode. Any camera that is unlisted, or any
+                malformed configuration, is aggregate-only: counts without people.
+                The backend rejects person events from such cameras outright.
+              </span>
+            </li>
+            <li>
+              <span className="spec-term">Face recognition</span>
+              <span className="spec-def">
+                Off wherever identity mode is not granted. Enrolling a face also needs
+                active employee consent on the camera that saw the person, and the
+                backend re-verifies that consent at enrollment time. Names are stored
+                only when both checks pass.
+              </span>
+            </li>
+            <li>
+              <span className="spec-term">Consent state</span>
+              <span className="spec-def">
+                Consent is checked server side and fails closed: a missing consent file
+                or an unknown camera behaves as no consent. Employees manage their own
+                optional wellness consent from the Wellness tab, and can withdraw it
+                there at any time.
+              </span>
+            </li>
+          </ul>
+        </section>
+      </Reveal>
+
+      <Reveal>
         <section className="panel" aria-label="Working Time Rules">
           <SectionHead
             title="Working Time Rules"
@@ -160,7 +237,7 @@ export default function PolicyView() {
               <input className="input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             </Field>
             <button type="button" className="btn btn-primary" onClick={() => { void checkViolations(); }} disabled={checking}>
-              {checking ? 'Checking…' : 'Check'}
+              {checking ? 'Checking' : 'Check'}
             </button>
           </div>
 
@@ -211,9 +288,16 @@ export default function PolicyView() {
       </Reveal>
 
       <Reveal>
-        <section className="panel" aria-label="Privacy Controls">
-          <SectionHead title="Privacy Controls" />
+        <section className="panel" aria-label="Privacy controls">
+          <SectionHead title="Retention and exclusions" meta="live from the policy rules endpoint" />
           <ul className="spec-list">
+            <li>
+              <span className="spec-term">Data Retention</span>
+              <span className="spec-def">
+                Logs older than {rulesData?.retention_days ?? 90} days are deleted automatically by
+                the retention purge. Deleted means gone, not archived.
+              </span>
+            </li>
             <li>
               <span className="spec-term">Excluded Applications</span>
               <span className="spec-def">
@@ -226,19 +310,6 @@ export default function PolicyView() {
               <span className="spec-term">Excluded Title Pattern</span>
               <span className="spec-def" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>
                 {rulesData?.excluded_titles_regex ?? 'none configured'}
-              </span>
-            </li>
-            <li>
-              <span className="spec-term">Data Retention</span>
-              <span className="spec-def">
-                Logs older than {rulesData?.retention_days ?? 90} days are deleted automatically.
-              </span>
-            </li>
-            <li>
-              <span className="spec-term">Capture Limits</span>
-              <span className="spec-def">
-                Only input counts are recorded. Keystroke content is never captured. First-run consent
-                is required on the workstation before any logging starts.
               </span>
             </li>
           </ul>

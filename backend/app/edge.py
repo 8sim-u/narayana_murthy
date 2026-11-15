@@ -4,27 +4,40 @@ Server side of the vision edge roadmap. Vision nodes POST detection events
 to /event (with the new optional edge fields); this module adds:
 
   GET  /positions        live person positions (in-memory registry, 10s expiry)
+  GET  /geofences         saved per-camera map polygons
+  POST /geofences         save one polygon
+  DELETE /geofences/{id}  remove a polygon
+  GET  /geofence-events   employee-private entry/exit transitions
   GET  /heatmap          stored position aggregates for heatmap rendering
   GET  /occupancy        time-bucketed distinct-person counts
   POST /faces/enroll     enroll a face (multipart photo, or JSON with snapshot_path)
   GET  /faces            list enrolled names
-  GET  /faces/gallery    name + embedding list for edge-node sync
+  GET  /faces/gallery    name + embedding list filtered by camera consent
   GET  /faces/gallery/version
-                         gallery version marker for edge-node sync polling
+                         gallery version marker for administrative clients
   DELETE /faces/{name}  remove a person from the gallery and the registry
   GET  /identities       persistent known-persons registry, most recently seen first
   GET  /unknowns         recent unknown sightings with snapshot links, for review
   GET  /snapshots/{f}    serve snapshot JPEGs for dashboard thumbnails
 
-Gallery refresh after enroll/delete: the backend is the source of truth
-for the gallery (embeddings live in the faces table, served by
-GET /faces/gallery). Every enroll or delete bumps a version counter, kept
-in data/faces/.gallery_version and exposed by GET /faces/gallery/version.
-A vision node syncs by polling that version endpoint and, when the version
-changes, re-fetching GET /faces/gallery and calling face_id.reload_gallery()
-(the vision-side cache drop; face_id.py already provides it). The backend
-never writes vision/faces/*.json itself. Enroll/delete responses also
-carry the new gallery_version so a caller can confirm the bump.
+Gallery access is camera-scoped: GET /faces/gallery requires a middleware-
+validated deployment API key, camera_id, identity mode, and active consent for
+each returned employee. When no deployment key is configured the gate is
+open (keyless dev and test setups); when one is configured the key is
+required. Vision refreshes
+this allow-list directly; the legacy unscoped gallery builder is disabled.
+Unscoped person-level map, identity, unknown-sighting, and snapshot views
+are operational views gated by the deployment API key when one is
+configured, not by an employee token (auth decision, 2026-11-15; see
+app.main list_events). They are not employee-scoped because the dashboard
+and vision nodes authenticate with the deployment key, not employee tokens.
+Identity data in them is consent-filtered at the source instead: enrollment
+requires active camera consent, the live position registry scrubs a name
+the moment consent is withdrawn, and the gallery returns only
+active-consent identities for the requested camera. Geofence history is
+available only to the employee identified by a valid X-Employee-Token. The backend remains the source of truth
+for enrolled embeddings. Enroll/delete responses also carry a gallery version
+marker for clients that need to observe changes.
 
 Known-persons registry: table person_identities (see app.models).
 PersonIdentity rows are created on enroll and bumped on every sighting of
@@ -37,19 +50,22 @@ Wiring (applied in app.main, not here):
     from app.edge import router as edge_router
     app.include_router(edge_router)
 
-Auth: the APIKeyAuthMiddleware in app.auth covers every route (except the
-health/docs exemptions), so these endpoints inherit the same X-API-Key
-behavior as the existing dashboard GETs. Nothing extra is needed here.
+The deployment API key authenticates trusted clients but is not an employee or
+manager identity. Broad person-level views are disabled until trusted server-side
+manager authentication and roster authorization are available; personal event
+history is bound to X-Employee-Token in app.main, app.exports, and app.edge.
 
-Backward compatibility: the new DetectionEvent columns are all nullable and
-added additively. ensure_schema() adds any missing columns to existing
-databases at startup (this project has no Alembic migrations; tables are
-created with Base.metadata.create_all).
+Backward compatibility: new DetectionEvent columns and GeofenceEvent.employee_id
+are nullable and added additively. ensure_schema() adds missing columns to
+existing databases at startup (this project has no Alembic migrations; tables
+are created with Base.metadata.create_all). Legacy geofence rows retain a null
+employee_id and are excluded from employee-private history.
 """
 
 import json
 import logging
 import io
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -60,16 +76,31 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Float, Integer, JSON, String, func, inspect, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import database
+from app.camera_consent import camera_mode, has_active_camera_consent
 from app.database import get_db
-from app.models import Base, DetectionEvent, FaceRecord, PersonIdentity
+from app.employee_auth import require_employee
+from app.alerts import dispatch_alert
+from app.geofencing import forget_position, normalize_position, observe_position, remember_position
+from app.models import (
+    Base, DetectionEvent, FaceRecord, GeofenceEvent, GeofenceZone, PersonIdentity,
+)
 
 logger = logging.getLogger("wamss.api.edge")
 
 router = APIRouter(tags=["edge"])
+
+
+def _require_authenticated_deployment_key(request: Request):
+    """Require middleware-validated service auth even in keyless dev setups."""
+    if not getattr(request.state, "api_key_authenticated", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A configured, valid deployment API key is required for this endpoint",
+        )
 
 # ---------------------------------------------------------------- paths
 
@@ -90,12 +121,14 @@ _ensure_data_dirs()
 
 # Additive DDL for existing deployments: create_all() only creates missing
 # tables, never missing columns. This keeps old databases working after the
-# edge columns were added to the model.
+# edge columns and geofence ownership were added to the model.
 _EDGE_COLUMNS: List[Tuple[str, Any]] = [
     ("person_name", String(128)),
+    ("employee_id", String(128)),
     ("person_name_confidence", Float()),
     ("position_x", Float()),
     ("position_y", Float()),
+    ("position_bounds", JSON()),
     ("snapshot_path", String(256)),
     ("dwell_seconds", Float()),
 ]
@@ -110,6 +143,10 @@ _IDENTITY_COLUMNS: List[Tuple[str, Any]] = [
     ("cameras", JSON()),
 ]
 
+_GEOFENCE_EVENT_COLUMNS: List[Tuple[str, Any]] = [
+    ("employee_id", String(128)),
+]
+
 
 def _add_missing_columns(conn, table: str, columns: List[Tuple[str, Any]], dialect) -> None:
     cols = {c["name"] for c in inspect(conn).get_columns(table)}
@@ -122,20 +159,28 @@ def _add_missing_columns(conn, table: str, columns: List[Tuple[str, Any]], diale
 
 
 def ensure_schema() -> None:
-    """Add any missing edge columns and the identities registry (additive).
+    """Add missing edge columns and create identities/geofence tables (additive).
 
-    Idempotent and safe on old databases: creates the person_identities
-    table when it does not exist yet, and adds any missing columns to
-    detection_events and person_identities. Never drops or rewrites
-    existing tables or data.
+    Idempotent and safe on old databases: creates missing additive tables and
+    adds any missing columns to detection_events, person_identities, and
+    geofence_events. Legacy geofence rows retain a null employee_id and are
+    excluded from employee-private history. Never drops or rewrites existing
+    tables or data.
     """
     try:
         engine = database.engine
         # Create the registry table if this database predates it.
-        Base.metadata.create_all(bind=engine, tables=[PersonIdentity.__table__])
+        Base.metadata.create_all(
+            bind=engine,
+            tables=[PersonIdentity.__table__, GeofenceZone.__table__, GeofenceEvent.__table__],
+        )
         with engine.begin() as conn:
             _add_missing_columns(conn, "detection_events", _EDGE_COLUMNS, engine.dialect)
             _add_missing_columns(conn, "person_identities", _IDENTITY_COLUMNS, engine.dialect)
+            _add_missing_columns(conn, "geofence_events", _GEOFENCE_EVENT_COLUMNS, engine.dialect)
+            for index in GeofenceEvent.__table__.indexes:
+                if "employee_id" in {column.name for column in index.columns}:
+                    index.create(bind=conn, checkfirst=True)
     except Exception as exc:
         # Never break startup or imports: a missing column will surface as a
         # normal SQL error on the specific endpoint instead.
@@ -166,16 +211,19 @@ def record_position(
     x: Optional[float] = None,
     y: Optional[float] = None,
     person_name_confidence: Optional[float] = None,
+    position_bounds: Optional[List[float]] = None,
 ) -> None:
-    """Record a live position. No-op when coordinates are absent."""
-    if x is None or y is None:
+    """Record a normalized live position. No-op when coordinates are invalid."""
+    point = normalize_position(x, y, position_bounds)
+    if point is None:
         return
+    normalized_x, normalized_y = point
     _position_registry[(camera_id, track_id)] = {
         "track_id": track_id,
         "person_name": person_name,
         "person_name_confidence": person_name_confidence,
-        "x": x,
-        "y": y,
+        "x": normalized_x,
+        "y": normalized_y,
         "camera_id": camera_id,
         "last_seen": datetime.now(timezone.utc),
         "last_seen_monotonic": time.monotonic(),
@@ -191,18 +239,27 @@ def _live_positions() -> List[Dict[str, Any]]:
     ]
     for key in expired:
         del _position_registry[key]
-    return [
-        {
+    result = []
+    for entry in _position_registry.values():
+        name = entry["person_name"]
+        confidence = entry.get("person_name_confidence")
+        if name and not has_active_camera_consent(name, entry["camera_id"]):
+            # A live position is ephemeral, not historical event data. Scrub
+            # cached identity immediately after revocation or a mode change.
+            entry["person_name"] = None
+            entry["person_name_confidence"] = None
+            name = None
+            confidence = None
+        result.append({
             "track_id": entry["track_id"],
-            "person_name": entry["person_name"],
-            "person_name_confidence": entry.get("person_name_confidence"),
+            "person_name": name,
+            "person_name_confidence": confidence,
             "x": entry["x"],
             "y": entry["y"],
             "camera_id": entry["camera_id"],
             "last_seen": entry["last_seen"].isoformat(),
-        }
-        for entry in _position_registry.values()
-    ]
+        })
+    return result
 
 
 class PositionOut(BaseModel):
@@ -212,8 +269,8 @@ class PositionOut(BaseModel):
         default=None,
         description="Confidence of the person identification, or null when not reported",
     )
-    x: float
-    y: float
+    x: float = Field(description="Normalized room-map x coordinate (0..1)")
+    y: float = Field(description="Normalized room-map y coordinate (0..1)")
     camera_id: str
     last_seen: str = Field(description="ISO 8601 timestamp of the last update")
 
@@ -226,6 +283,259 @@ def get_positions():
     contains people currently seen by an edge node.
     """
     return _live_positions()
+
+
+# ---------------------------------------------------------------- geofences
+
+class GeofenceZoneCreate(BaseModel):
+    camera_id: str
+    name: str
+    polygon: List[List[float]]
+
+
+class GeofenceZoneOut(BaseModel):
+    id: int
+    camera_id: str
+    name: str
+    polygon: List[List[float]]
+
+
+class GeofenceEventOut(BaseModel):
+    zone_name: str
+    transition: str
+    person_name: str
+    timestamp: datetime
+
+
+MAX_GEOFENCES_PER_CAMERA = 100
+MAX_GEOFENCE_VERTICES = 100
+
+
+def _validate_geofence_polygon(polygon: Any) -> List[List[float]]:
+    """Validate a polygon in the normalized map coordinate space (0..1)."""
+    if not isinstance(polygon, list) or not 3 <= len(polygon) <= MAX_GEOFENCE_VERTICES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"polygon must contain 3 to {MAX_GEOFENCE_VERTICES} points",
+        )
+    points: List[List[float]] = []
+    for point in polygon:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="each polygon point must be [x, y]",
+            )
+        try:
+            x, y = float(point[0]), float(point[1])
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="polygon coordinates must be finite numbers",
+            )
+        if not (math.isfinite(x) and math.isfinite(y) and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="polygon coordinates must be within 0..1",
+            )
+        points.append([x, y])
+    distinct = {(x, y) for x, y in points}
+    area_twice = abs(sum(
+        points[i][0] * points[(i + 1) % len(points)][1]
+        - points[(i + 1) % len(points)][0] * points[i][1]
+        for i in range(len(points))
+    ))
+    if len(distinct) < 3 or area_twice <= 1e-9:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="polygon must enclose a non-zero area",
+        )
+    return points
+
+
+@router.get("/geofences", response_model=List[GeofenceZoneOut], dependencies=[Depends(_require_authenticated_deployment_key)])
+def get_geofences(
+    camera_id: Optional[str] = Query(None, description="Filter zones to one camera"),
+    db: Session = Depends(get_db),
+):
+    """List saved camera polygons, ordered by camera and creation order."""
+    try:
+        query = db.query(GeofenceZone)
+        if camera_id:
+            query = query.filter(GeofenceZone.camera_id == camera_id)
+        rows = query.order_by(
+            GeofenceZone.camera_id.asc(), GeofenceZone.id.asc()
+        ).limit(1000).all()
+        return [GeofenceZoneOut(
+            id=row.id, camera_id=row.camera_id, name=row.name, polygon=row.polygon
+        ) for row in rows]
+    except SQLAlchemyError as exc:
+        logger.error("geofence list query failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to list geofences",
+        )
+
+
+@router.post("/geofences", response_model=GeofenceZoneOut, status_code=status.HTTP_201_CREATED, dependencies=[Depends(_require_authenticated_deployment_key)])
+def create_geofence(zone_in: GeofenceZoneCreate, db: Session = Depends(get_db)):
+    """Save one named polygon for one camera."""
+    camera_id = zone_in.camera_id.strip()
+    name = zone_in.name.strip()
+    if not camera_id or len(camera_id) > 64:
+        raise HTTPException(status_code=422, detail="camera_id must contain 1 to 64 characters")
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=422, detail="name must contain 1 to 80 characters")
+    polygon = _validate_geofence_polygon(zone_in.polygon)
+    try:
+        count = db.query(GeofenceZone).filter(GeofenceZone.camera_id == camera_id).count()
+        if count >= MAX_GEOFENCES_PER_CAMERA:
+            raise HTTPException(status_code=422, detail="camera has reached the geofence limit")
+        zone = GeofenceZone(camera_id=camera_id, name=name, polygon=polygon)
+        db.add(zone)
+        db.commit()
+        db.refresh(zone)
+        return GeofenceZoneOut(
+            id=zone.id, camera_id=zone.camera_id, name=zone.name, polygon=zone.polygon
+        )
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="a geofence with this name already exists for the camera")
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("geofence create failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to save geofence",
+        )
+
+
+@router.delete("/geofences/{zone_id}", dependencies=[Depends(_require_authenticated_deployment_key)])
+def delete_geofence(zone_id: int, db: Session = Depends(get_db)):
+    """Delete a polygon; existing transition history is retained."""
+    zone = db.query(GeofenceZone).filter(GeofenceZone.id == zone_id).first()
+    if zone is None:
+        raise HTTPException(status_code=404, detail="Geofence not found")
+    try:
+        db.delete(zone)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.error("geofence delete failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to delete geofence",
+        )
+    return {"deleted": True, "id": zone_id}
+
+
+@router.get("/geofence-events", response_model=List[GeofenceEventOut])
+def get_geofence_events(
+    limit: int = Query(50, ge=1, le=100),
+    camera_id: Optional[str] = Query(None, description="Filter transition history to one camera"),
+    authenticated_employee_id: str = Depends(require_employee),
+    db: Session = Depends(get_db),
+):
+    """List only the authenticated employee's crossings, without identifiers or positions."""
+    try:
+        query = db.query(GeofenceEvent).filter(
+            GeofenceEvent.employee_id == authenticated_employee_id
+        )
+        if camera_id:
+            query = query.filter(GeofenceEvent.camera_id == camera_id)
+        rows = query.order_by(
+            GeofenceEvent.timestamp.desc(), GeofenceEvent.id.desc()
+        ).limit(limit).all()
+        return [GeofenceEventOut(
+            zone_name=row.zone_name, transition=row.transition,
+            person_name=row.person_name,
+            timestamp=row.timestamp,
+        ) for row in rows]
+    except SQLAlchemyError as exc:
+        logger.error("geofence event query failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable; unable to list geofence events",
+        )
+
+
+def process_geofence_position(
+    db: Session,
+    camera_id: str,
+    track_id: str,
+    person_name: Optional[str],
+    employee_id: str,
+    x: Optional[float],
+    y: Optional[float],
+    position_bounds: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
+    """Persist and notify observed crossings; never store point or track ID."""
+    point = normalize_position(x, y, position_bounds)
+    if (
+        point is None
+        or not camera_id
+        or not track_id
+        or track_id.strip().lower() == "unknown"
+        or not employee_id
+        or not employee_id.strip()
+    ):
+        return []
+    try:
+        zones = (
+            db.query(GeofenceZone)
+            .filter(GeofenceZone.camera_id == camera_id)
+            .order_by(GeofenceZone.id.asc())
+            .all()
+        )
+    except SQLAlchemyError as exc:
+        logger.warning("geofence lookup failed: %s", type(exc).__name__)
+        return []
+    if not zones:
+        return []
+
+    transitions = observe_position(camera_id, track_id, point, zones)
+    if not transitions:
+        remember_position(camera_id, track_id, point, zones)
+        return []
+
+    occurred_at = datetime.now(timezone.utc)
+    label = person_name.strip()[:128] if person_name and person_name.strip() else "Unknown"
+    if label.lower() == "unknown":
+        label = "Unknown"
+    alert_rows: List[Dict[str, Any]] = []
+    try:
+        for transition in transitions:
+            db.add(GeofenceEvent(
+                camera_id=camera_id,
+                zone_name=transition["zone_name"],
+                transition=transition["transition"],
+                person_name=label,
+                employee_id=employee_id,
+                timestamp=occurred_at,
+            ))
+            alert_rows.append({
+                "kind": f"geofence_{transition['transition']}",
+                "payload": {
+                    "camera_id": camera_id,
+                    "zone_name": transition["zone_name"],
+                    "transition": transition["transition"],
+                    "timestamp": occurred_at.isoformat(),
+                },
+            })
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.warning("geofence transition persistence failed: %s", type(exc).__name__)
+        # observe_position already recorded the state; rewind it so the
+        # unpersisted transition re-emits on the next observation.
+        forget_position(camera_id, track_id, zones)
+        return []
+
+    remember_position(camera_id, track_id, point, zones)
+    for alert in alert_rows:
+        dispatch_alert(alert["kind"], alert["payload"])
+    return transitions
 
 # ---------------------------------------------------------------- heatmap
 
@@ -247,12 +557,14 @@ def get_heatmap(
 ):
     """Aggregate stored (position_x, position_y) points for heatmap rendering.
 
-    Returns raw points with weight 1, newest first, capped at 2000 points.
+    Returns normalized room-map points with weight 1, newest first, capped at 2000.
     """
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     try:
         query = db.query(
-            DetectionEvent.position_x, DetectionEvent.position_y
+            DetectionEvent.position_x,
+            DetectionEvent.position_y,
+            DetectionEvent.position_bounds,
         ).filter(
             DetectionEvent.timestamp >= since,
             DetectionEvent.position_x.is_not(None),
@@ -271,7 +583,12 @@ def get_heatmap(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database unavailable; unable to build heatmap",
         )
-    return [HeatPoint(x=x, y=y, weight=1) for x, y in rows]
+    points = []
+    for x, y, bounds in rows:
+        point = normalize_position(x, y, bounds)
+        if point is not None:
+            points.append(HeatPoint(x=point[0], y=point[1], weight=1))
+    return points
 
 # ---------------------------------------------------------------- occupancy
 
@@ -347,9 +664,8 @@ def get_occupancy(
 
 # ---------------------------------------------------------------- identities
 
-# Gallery version marker: bumped on every enroll/delete so vision nodes can
-# poll GET /faces/gallery/version and re-fetch the gallery only when it
-# changes. File content is {"version": N, "updated_at": ISO timestamp}.
+# Gallery version marker: bumped on every enroll/delete. File content is
+# {"version": N, "updated_at": ISO timestamp}.
 GALLERY_VERSION_FILE = FACES_DIR / ".gallery_version"
 
 
@@ -566,12 +882,19 @@ def _read_snapshot_bytes(snapshot_path: str) -> bytes:
         )
 
 
-def _store_enrollment(db: Session, name: str, image_bytes: bytes) -> Dict[str, Any]:
+def _store_enrollment(db: Session, name: str, image_bytes: bytes,
+                      camera_id: str) -> Dict[str, Any]:
     """Store one enrollment: photo file, FaceRecord, and registry row.
 
     Shared by the upload and snapshot-path enroll paths. Returns the
-    response body. Raises HTTPException on storage or database failure.
+    response body. Consent is checked before any photo or embedding is stored.
     """
+    if (camera_mode(camera_id) != "identity"
+            or not has_active_camera_consent(name, camera_id)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active employee consent for this identity camera is required",
+        )
     safe_name = _sanitize_name(name)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{safe_name}_{stamp}.jpg"
@@ -624,7 +947,7 @@ def _store_enrollment(db: Session, name: str, image_bytes: bytes) -> Dict[str, A
     }
 
 
-@router.post("/faces/enroll")
+@router.post("/faces/enroll", dependencies=[Depends(_require_authenticated_deployment_key)])
 async def enroll_face(request: Request, db: Session = Depends(get_db)):
     """Enroll a face for person identification, two ways.
 
@@ -655,6 +978,7 @@ async def enroll_face(request: Request, db: Session = Depends(get_db)):
             )
         name = payload.get("name")
         snapshot_path = payload.get("snapshot_path")
+        camera_id = payload.get("camera_id")
         if not isinstance(name, str) or not name.strip():
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -665,13 +989,24 @@ async def enroll_face(request: Request, db: Session = Depends(get_db)):
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="snapshot_path is required",
             )
+        if not isinstance(camera_id, str) or not camera_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="camera_id is required",
+            )
+        if (camera_mode(camera_id) != "identity"
+                or not has_active_camera_consent(name, camera_id)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Active employee consent for this identity camera is required",
+            )
         image_bytes = _read_snapshot_bytes(snapshot_path)
         if not image_bytes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Snapshot file is empty",
             )
-        return _store_enrollment(db, name, image_bytes)
+        return _store_enrollment(db, name, image_bytes, camera_id)
 
     try:
         form = await request.form()
@@ -682,11 +1017,23 @@ async def enroll_face(request: Request, db: Session = Depends(get_db)):
             detail="Could not parse the enrollment form",
         )
     name = form.get("name")
+    camera_id = form.get("camera_id")
     photo = form.get("photo")
     if not isinstance(name, str) or not name.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="name is required",
+        )
+    if not isinstance(camera_id, str) or not camera_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="camera_id is required",
+        )
+    if (camera_mode(camera_id) != "identity"
+            or not has_active_camera_consent(name, camera_id)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Active employee consent for this identity camera is required",
         )
     if photo is None or not hasattr(photo, "read"):
         raise HTTPException(
@@ -706,7 +1053,7 @@ async def enroll_face(request: Request, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Uploaded photo is empty",
         )
-    return _store_enrollment(db, name, image_bytes)
+    return _store_enrollment(db, name, image_bytes, camera_id)
 
 
 @router.get("/faces", response_model=List[FaceInfo])
@@ -723,9 +1070,13 @@ def list_faces(db: Session = Depends(get_db)):
     return [FaceInfo(name=r.name, enrolled_at=r.enrolled_at) for r in records]
 
 
-@router.get("/faces/gallery", response_model=List[FaceGalleryItem])
-def get_face_gallery(db: Session = Depends(get_db)):
-    """Return name + embedding pairs so edge nodes can sync the gallery."""
+@router.get("/faces/gallery", response_model=List[FaceGalleryItem], dependencies=[Depends(_require_authenticated_deployment_key)])
+def get_face_gallery(
+    camera_id: str = Query(..., min_length=1), db: Session = Depends(get_db)
+):
+    """Return only active-consent identities eligible for this camera."""
+    if camera_mode(camera_id) != "identity":
+        return []
     try:
         records = db.query(FaceRecord).order_by(FaceRecord.name.asc()).all()
     except SQLAlchemyError as exc:
@@ -734,16 +1085,16 @@ def get_face_gallery(db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database unavailable; unable to fetch face gallery",
         )
-    return [FaceGalleryItem(name=r.name, embedding=r.embedding) for r in records]
+    return [
+        FaceGalleryItem(name=r.name, embedding=r.embedding)
+        for r in records
+        if r.embedding and has_active_camera_consent(r.name, camera_id)
+    ]
 
 
-@router.get("/faces/gallery/version", response_model=GalleryVersionOut)
+@router.get("/faces/gallery/version", response_model=GalleryVersionOut, dependencies=[Depends(_require_authenticated_deployment_key)])
 def get_face_gallery_version(db: Session = Depends(get_db)):
-    """Gallery version marker for edge-node sync polling.
-
-    Vision nodes poll this cheap endpoint and re-fetch GET /faces/gallery
-    only when ``version`` changes (it bumps on every enroll and delete).
-    """
+    """Gallery version marker for clients that need to observe changes."""
     try:
         count = db.query(FaceRecord).count()
     except SQLAlchemyError as exc:
@@ -758,15 +1109,14 @@ def get_face_gallery_version(db: Session = Depends(get_db)):
     )
 
 
-@router.delete("/faces/{name}")
+@router.delete("/faces/{name}", dependencies=[Depends(_require_authenticated_deployment_key)])
 def delete_face(name: str, db: Session = Depends(get_db)):
     """Remove a person from the gallery and the registry.
 
     Deletes the FaceRecord and the PersonIdentity row, plus the stored
     face photo under data/faces/ when it belongs to this enrollment.
-    Vision-side gallery JSON files (vision/faces/) are owned by the vision
-    node, not this backend, so they are left alone; the node drops the
-    person on its next gallery sync (see GET /faces/gallery/version).
+    The running camera loop uses a consent-filtered backend allow-list, so a
+    deleted identity is no longer returned on its next refresh.
     Returns 404 when the name is in neither the gallery nor the registry.
     """
     try:

@@ -11,8 +11,8 @@ installed (neither is available on this VM):
 
 - the real vision/face_id.py cosine matcher, with its insightface backend
   stubbed at the _face_app boundary (a fake FaceAnalysis whose get()
-  returns scripted normed embeddings), reading a real gallery JSON
-  sidecar from a temporary gallery dir;
+  returns scripted normed embeddings), given an explicit camera-authorized
+  gallery list;
 - the real vision/identity_cache.py majority voter, fed by an identify
   function that calls the real face_id.identify_with_confidence;
 - one multicamera-level test proving the crop path
@@ -94,7 +94,7 @@ def _load_face_id(monkeypatch, tmp_path):
 
 
 def _enroll(face_id_mod, name, embedding):
-    """Write one gallery JSON sidecar, as enroll_face.py would."""
+    """Create a synthetic enrollment and return its authorized gallery item."""
     entry = {
         "name": name,
         "method": "insightface",
@@ -105,8 +105,7 @@ def _enroll(face_id_mod, name, embedding):
     path = os.path.join(face_id_mod.GALLERY_DIR, safe + ".json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(entry, fh)
-    face_id_mod.reload_gallery()
-    return path
+    return entry
 
 
 def _load_identity_cache():
@@ -134,58 +133,57 @@ def _observe_twice(cache, track_key, frame):
 # face_id level: matching is by embedding, not by track
 # --------------------------------------------------------------------------
 
+
 def test_matching_embedding_identifies(monkeypatch, tmp_path):
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     fake_app.embedding = list(ALICE_EMB)
-    assert face_id_mod.identify_with_confidence(_crop()) == \
+    # A local sidecar by itself does not authorize identification.
+    assert face_id_mod.identify_with_confidence(_crop()) == ("unknown", None)
+    assert face_id_mod.identify_with_confidence(_crop(), gallery) == \
         ("Alice", pytest.approx(1.0))
 
 
 def test_non_matching_embedding_stays_unknown(monkeypatch, tmp_path):
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     fake_app.embedding = list(BOB_EMB)  # orthogonal: cosine 0
-    assert face_id_mod.identify_with_confidence(_crop()) == \
+    assert face_id_mod.identify_with_confidence(_crop(), gallery) == \
         ("unknown", None)
 
 
 def test_below_threshold_embedding_stays_unknown(monkeypatch, tmp_path):
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     fake_app.embedding = list(WEAK_EMB)  # cosine 0.4 < 0.5 threshold
-    assert face_id_mod.identify_with_confidence(_crop()) == \
+    assert face_id_mod.identify_with_confidence(_crop(), gallery) == \
         ("unknown", None)
 
 
 def test_no_face_in_crop_stays_unknown(monkeypatch, tmp_path):
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     fake_app.embedding = None  # the backend found no face
-    assert face_id_mod.identify_with_confidence(_crop()) == \
+    assert face_id_mod.identify_with_confidence(_crop(), gallery) == \
         ("unknown", None)
-
 
 # --------------------------------------------------------------------------
 # Re-identification across track ids (the core promise)
 # --------------------------------------------------------------------------
 
+
 def test_same_face_new_track_is_same_person(monkeypatch, tmp_path):
-    """Alice leaves and returns under a new track id: same name, same
-    confidence. The gallery, not the track id, is the memory."""
+    """The same authorized identity is matched under a new track id."""
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     ic = _load_identity_cache()
     cache = ic.IdentityCache(
-        lambda frame, bbox: face_id_mod.identify_with_confidence(frame),
+        lambda frame, bbox: face_id_mod.identify_with_confidence(frame, gallery),
         recheck_frames=1, recheck_seconds=5.0)
     frame = _crop()
-
     fake_app.embedding = list(ALICE_EMB)
     assert _observe_twice(cache, "Person 1", frame) == \
         ("Alice", pytest.approx(1.0))
-
-    # Same face, brand new track id: recognised again, from the gallery.
     assert _observe_twice(cache, "Person 7", frame) == \
         ("Alice", pytest.approx(1.0))
     assert cache.identity("Person 1") == ("Alice", pytest.approx(1.0))
@@ -195,33 +193,28 @@ def test_same_face_new_track_is_same_person(monkeypatch, tmp_path):
 def test_non_matching_face_new_track_stays_unknown(monkeypatch, tmp_path):
     """A stranger under a new track id is not given an enrolled name."""
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     ic = _load_identity_cache()
     cache = ic.IdentityCache(
-        lambda frame, bbox: face_id_mod.identify_with_confidence(frame),
+        lambda frame, bbox: face_id_mod.identify_with_confidence(frame, gallery),
         recheck_frames=1, recheck_seconds=5.0)
-    frame = _crop()
-
     fake_app.embedding = list(BOB_EMB)
-    assert _observe_twice(cache, "Person 3", frame) == ("unknown", None)
+    assert _observe_twice(cache, "Person 3", _crop()) == ("unknown", None)
     assert cache.identity("Person 3") == ("unknown", None)
 
 
 def test_reidentified_track_keeps_name_across_rechecks(monkeypatch, tmp_path):
-    """Once Alice is named under a track, later re-checks that find no
-    face (occlusion, turned head) do not flip her back to unknown."""
+    """A named track remains stable while an authorized match is transiently absent."""
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     ic = _load_identity_cache()
     cache = ic.IdentityCache(
-        lambda frame, bbox: face_id_mod.identify_with_confidence(frame),
+        lambda frame, bbox: face_id_mod.identify_with_confidence(frame, gallery),
         recheck_frames=1, recheck_seconds=5.0)
     frame = _crop()
-
     fake_app.embedding = list(ALICE_EMB)
     assert _observe_twice(cache, "Person 2", frame)[0] == "Alice"
-
-    fake_app.embedding = None  # face no longer visible on re-checks
+    fake_app.embedding = None
     for frame_no in (3, 4, 5):
         name, conf = cache.observe("Person 2", frame, [0, 0, 10, 10],
                                    frame_no, 100.0)
@@ -229,28 +222,21 @@ def test_reidentified_track_keeps_name_across_rechecks(monkeypatch, tmp_path):
         assert conf == pytest.approx(1.0)
 
 
-def test_gallery_reload_names_new_person_on_new_track(monkeypatch, tmp_path):
-    """A gallery reload (the gallery-sync path) makes a newly enrolled
-    person recognisable under a fresh track id, without restarting."""
+def test_authorized_gallery_update_names_new_person_on_new_track(monkeypatch, tmp_path):
+    """A refreshed camera allow-list can authorize a new identity immediately."""
     face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
     ic = _load_identity_cache()
     cache = ic.IdentityCache(
-        lambda frame, bbox: face_id_mod.identify_with_confidence(frame),
+        lambda frame, bbox: face_id_mod.identify_with_confidence(frame, gallery),
         recheck_frames=1, recheck_seconds=5.0)
     frame = _crop()
-
     fake_app.embedding = list(ALICE_EMB)
     assert _observe_twice(cache, "Person 1", frame)[0] == "Alice"
-
-    # Bob enrolls after the pipeline started; the reload picks him up.
-    _enroll(face_id_mod, "Bob", BOB_EMB)
+    gallery.append(_enroll(face_id_mod, "Bob", BOB_EMB))
     fake_app.embedding = list(BOB_EMB)
-    assert _observe_twice(cache, "Person 9", frame) == \
-        ("Bob", pytest.approx(1.0))
-    # Alice's existing track is unaffected by the reload.
+    assert _observe_twice(cache, "Person 9", frame) == ("Bob", pytest.approx(1.0))
     assert cache.identity("Person 1") == ("Alice", pytest.approx(1.0))
-
 
 # --------------------------------------------------------------------------
 # Multicamera crop path feeds the real face_id module
@@ -295,25 +281,20 @@ def _load_multicamera_with_real_face_id(monkeypatch, face_id_mod):
     return mod
 
 
-def test_multicamera_crop_path_reidentifies(monkeypatch, tmp_path):
-    """_identify_crop_scored crops the tracked box and the real face_id
-    names it, so the multicamera loop can re-identify a returning person
-    under a new track id."""
-    face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
-    _enroll(face_id_mod, "Alice", ALICE_EMB)
-    mod = _load_multicamera_with_real_face_id(monkeypatch, face_id_mod)
 
+def test_multicamera_crop_path_reidentifies(monkeypatch, tmp_path):
+    """The crop path matches only against an explicitly supplied camera gallery."""
+    face_id_mod, fake_app = _load_face_id(monkeypatch, tmp_path)
+    gallery = [_enroll(face_id_mod, "Alice", ALICE_EMB)]
+    mod = _load_multicamera_with_real_face_id(monkeypatch, face_id_mod)
     frame = np.zeros((120, 160, 3), dtype=np.uint8)
     fake_app.embedding = list(ALICE_EMB)
-    assert mod._identify_crop_scored(frame, [10, 10, 50, 80]) == \
+    assert mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=gallery) == \
         ("Alice", pytest.approx(1.0))
-
-    # A different crop region holding the same face still matches: the
-    # match is on the face embedding, not on where the box sits.
-    fake_app.embedding = list(ALICE_EMB)
-    assert mod._identify_crop_scored(frame, [60, 10, 100, 80]) == \
+    assert mod._identify_crop_scored(
+        frame, [60, 10, 100, 80], gallery_entries=gallery) == \
         ("Alice", pytest.approx(1.0))
-
     fake_app.embedding = list(BOB_EMB)
-    assert mod._identify_crop_scored(frame, [10, 10, 50, 80]) == \
-        ("unknown", None)
+    assert mod._identify_crop_scored(
+        frame, [10, 10, 50, 80], gallery_entries=gallery) == ("unknown", None)

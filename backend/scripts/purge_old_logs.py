@@ -2,8 +2,8 @@
 """
 WAMSS data-retention purger.
 
-Deletes ActivityLog rows (and SecurityEvent rows when that model exists)
-older than N days, where N comes from env WAMSS_RETENTION_DAYS (default 90).
+Deletes expired activity-log prefixes, geofence transitions, aggregate occupancy,
+security events, and other configured records older than N days. N comes from WAMSS_RETENTION_DAYS (default 90).
 
 Usage:
     # dry run: only print what WOULD be deleted
@@ -54,17 +54,27 @@ def _getenv_int(name: str, default: int) -> int:
 def _models_to_purge():
     """Return (label, model, timestamp_column_name) for each table to purge."""
     from app.activity_models import ActivityLog
+    from app.models import AggregateOccupancyEvent, GeofenceEvent
+    from app.security_models import SecurityEvent
+    from app.wellness_models import (
+        BreathingSession, DailyOutcome, PredictionFeedback, SleepSession, WellnessBreak, WellnessDaily,
+    )
 
     targets = [("activity_logs", ActivityLog, "created_at")]
+    targets.extend([
+        ("wellness_daily", WellnessDaily, "day"),
+        ("wellness_sleep_sessions", SleepSession, "ended_at"),
+        ("daily_outcomes", DailyOutcome, "day"),
+        ("wellness_breathing_sessions", BreathingSession, "day"),
+        ("wellness_break_events", WellnessBreak, "day"),
+        ("prediction_feedback", PredictionFeedback, "created_at"),
+    ])
+    targets.extend([
+        ("geofence_events", GeofenceEvent, "timestamp"),
+        ("aggregate_occupancy_events", AggregateOccupancyEvent, "timestamp"),
+    ])
 
-    # SecurityEvent is a planned table that may not exist yet; purge it too
-    # when it does, so old security data cannot outlive the retention window.
-    try:
-        from app.models import SecurityEvent  # type: ignore[attr-defined]
-    except (ImportError, AttributeError):
-        logger.info("SecurityEvent model not present; skipping that table")
-    else:
-        targets.append(("security_events", SecurityEvent, "created_at"))
+    targets.append(("security_events", SecurityEvent, "created_at"))
 
     return targets
 
@@ -74,15 +84,32 @@ def purge_older_than(days: int, dry_run: bool = False) -> dict:
     Delete rows older than `days`. Returns {table_label: deleted_count}.
     With dry_run=True only counts and deletes nothing.
     """
-    from app.database import SessionLocal
+    from app.audit import purge_activity_prefix
+    from app.database import SessionLocal, init_db
+
+    targets = _models_to_purge()
+    # Register every target model before create_all and apply additive audit
+    # checkpoint migrations for standalone CLI runs.
+    init_db()
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     results = {}
     db = SessionLocal()
     try:
-        for label, model, ts_column in _models_to_purge():
+        for label, model, ts_column in targets:
+            if label == "activity_logs":
+                count = purge_activity_prefix(db, cutoff, dry_run=dry_run)
+                if dry_run:
+                    logger.info("[dry-run] %s: %d rows older than %d days would be deleted",
+                                label, count, days)
+                else:
+                    logger.info("%s: deleted %d rows older than %d days",
+                                label, count, days)
+                results[label] = count
+                continue
             column = getattr(model, ts_column)
-            query = db.query(model).filter(column < cutoff)
+            threshold = cutoff.date() if ts_column == "day" else cutoff
+            query = db.query(model).filter(column < threshold)
             if dry_run:
                 count = query.count()
                 logger.info("[dry-run] %s: %d rows older than %d days would be deleted",

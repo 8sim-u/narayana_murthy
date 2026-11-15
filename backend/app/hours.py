@@ -56,6 +56,7 @@ from sqlalchemy.orm import Session
 
 from app.activity_models import ActivityLog
 from app.database import get_db
+from app.employee_auth import ensure_employee_match, require_employee
 
 logger = logging.getLogger("wamss.api.hours")
 
@@ -334,12 +335,15 @@ def get_baseline(
     employee_id: str = Query(..., min_length=1, max_length=64, description="Employee ID"),
     days: int = Query(DEFAULT_BASELINE_DAYS, ge=7, le=90, description="Rolling baseline window in days"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """
     30-day (configurable) rolling baseline of active 15-minute bins for one
     employee. normal_start/normal_end are the 5th/95th percentile of the
     daily active span. bins holds 96 per-bin day counts.
     """
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=days)
     try:
@@ -358,6 +362,7 @@ def get_baseline(
 def get_anomaly(
     employee_id: str = Query(..., min_length=1, max_length=64, description="Employee ID"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """
     CERT-style anomaly check for one employee: z-score of the last 24h of
@@ -366,6 +371,8 @@ def get_anomaly(
     with no data (scores are 0.0 and the after-hours flag falls back to the
     configured work-hours window).
     """
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     now = datetime.now(timezone.utc)
     recent_start = now - timedelta(hours=24)
     baseline_start = now - timedelta(days=DEFAULT_BASELINE_DAYS)

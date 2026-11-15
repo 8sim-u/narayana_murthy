@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.activity_models import ActivityLog
 from app.database import get_db
+from app.employee_auth import ensure_employee_match, require_employee
 
 logger = logging.getLogger("wamss.api.policy")
 
@@ -279,11 +280,14 @@ def get_violations(
     employee_id: str = Query(..., description="Employee ID to evaluate"),
     date: date = Query(..., description="Calendar date (YYYY-MM-DD) in the policy timezone"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """
     Evaluate the policy rules against this employee's activity on the given
     date. Violations are computed on the fly; nothing is persisted.
     """
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     rules = load_rules()
     tz = ZoneInfo(rules.get("timezone", "UTC"))
     day_start = datetime(date.year, date.month, date.day, tzinfo=tz)

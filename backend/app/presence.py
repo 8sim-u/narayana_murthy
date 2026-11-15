@@ -33,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.employee_auth import require_employee
 from app.models import DetectionEvent
 
 logger = logging.getLogger("wamss.api.presence")
@@ -219,6 +220,7 @@ def _load_window_sec() -> int:
 def get_presence(
     office_id: Optional[str] = Query(None, description="Filter workstation activity to this office ID"),
     db: Session = Depends(get_db),
+    employee_id: str = Depends(require_employee),
 ):
     """
     Per-workstation presence states: correlates recent person detections in
@@ -245,7 +247,10 @@ def get_presence(
             .limit(5000)
             .all()
         )
-        activity_query = db.query(ActivityLog).filter(ActivityLog.end_time >= cutoff)
+        activity_query = db.query(ActivityLog).filter(
+            ActivityLog.end_time >= cutoff,
+            ActivityLog.employee_id == employee_id,
+        )
         if office_id is not None:
             activity_query = activity_query.filter(ActivityLog.office_id == office_id)
         activity_logs = (
@@ -261,4 +266,5 @@ def get_presence(
             detail="Database unavailable; unable to compute presence",
         )
 
-    return correlate(vision_events, activity_logs, zone_map, window_sec)
+    states = correlate(vision_events, activity_logs, zone_map, window_sec)
+    return [state for state in states if state["employee_id"] == employee_id]

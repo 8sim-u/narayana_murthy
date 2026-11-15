@@ -167,6 +167,10 @@ class IdentityCache:
             return UNKNOWN, None
         return state.name, state.confidence
 
+    def reset(self):
+        """Forget all cached names after consent or gallery authorization changes."""
+        self._tracks.clear()
+
     def _resolve(self, state):
         """Apply the voting rule to a track's vote window.
 

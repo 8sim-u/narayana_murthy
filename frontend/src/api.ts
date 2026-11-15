@@ -4,6 +4,8 @@ import type {
   EventCreate,
   EventResponse,
   HealthStatus,
+  GeofenceEvent,
+  GeofenceZone,
   HeatPoint,
   Identity,
   OccupancyBucket,
@@ -82,6 +84,40 @@ export async function getOccupancy(hours = 24, bucket = '15m'): Promise<Occupanc
   return handleResponse<OccupancyBucket[]>(res);
 }
 
+// Per-camera geofence polygons drawn on the normalized Room Map.
+export async function getGeofences(): Promise<GeofenceZone[]> {
+  const res = await fetch(`${API_URL}/geofences`);
+  return handleResponse<GeofenceZone[]>(res);
+}
+
+export async function createGeofence(
+  payload: Pick<GeofenceZone, 'camera_id' | 'name' | 'polygon'>,
+): Promise<GeofenceZone> {
+  const res = await fetch(`${API_URL}/geofences`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<GeofenceZone>(res);
+}
+
+export async function deleteGeofence(zoneId: number): Promise<{ deleted: boolean; id: number }> {
+  const res = await fetch(`${API_URL}/geofences/${zoneId}`, { method: 'DELETE' });
+  return handleResponse<{ deleted: boolean; id: number }>(res);
+}
+
+export async function getMyGeofenceEvents(
+  employeeToken: string,
+  limit = 50,
+): Promise<GeofenceEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await fetch(`${API_URL}/geofence-events?${params.toString()}`, {
+    headers: { 'X-Employee-Token': employeeToken },
+    cache: 'no-store',
+  });
+  return handleResponse<GeofenceEvent[]>(res);
+}
+
 // Resolve an event snapshot_path to a same-origin URL the browser can load.
 export function snapshotUrl(snapshotPath: string): string {
   const filename = snapshotPath.split('/').pop() ?? snapshotPath;
@@ -109,13 +145,13 @@ export async function getUnknowns(): Promise<UnknownSighting[]> {
   return fetchOptionalList<UnknownSighting>('/unknowns', []);
 }
 
-// POST /faces/enroll -> enroll an unknown sighting under a typed name.
-// Sends JSON { name, snapshot_path } as specified for the identity build.
-export async function enrollFace(name: string, snapshotPath: string): Promise<unknown> {
+// POST /faces/enroll -> enroll only after backend verifies active consent
+// for the employee on the originating camera.
+export async function enrollFace(name: string, snapshotPath: string, cameraId: string): Promise<unknown> {
   const res = await fetch(`${API_URL}/faces/enroll`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, snapshot_path: snapshotPath }),
+    body: JSON.stringify({ name, snapshot_path: snapshotPath, camera_id: cameraId }),
   });
   return handleResponse<unknown>(res);
 }

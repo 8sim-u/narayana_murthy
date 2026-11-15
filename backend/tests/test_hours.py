@@ -5,6 +5,8 @@ All activity rows are synthetic. Timezone is pinned to UTC via
 WAMSS_HOURS_TZ so bin math is deterministic.
 """
 
+import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -42,6 +44,15 @@ def _make_client() -> TestClient:
     app.include_router(hours_router)
     app.dependency_overrides[get_db] = _override_get_db
     return TestClient(app)
+
+
+def _employee_headers(employee_id: str, monkeypatch):
+    token = f"hours-test-token:{employee_id}"
+    monkeypatch.setenv(
+        "WAMSS_EMPLOYEE_TOKEN_HASHES",
+        json.dumps({employee_id: hashlib.sha256(token.encode()).hexdigest()}),
+    )
+    return {"X-Employee-Token": token}
 
 
 def _cleanup(db):
@@ -168,13 +179,16 @@ def test_burstiness_uniform_vs_concentrated():
 # ---------------------------------------------------------------- endpoints
 
 
-def test_baseline_endpoint_returns_normal_window():
+def test_baseline_endpoint_returns_normal_window(monkeypatch):
     emp = f"{A5}e_base"
     db = SessionLocal()
     try:
         _seed_baseline(db, emp)
         client = _make_client()
-        resp = client.get("/hours/baseline", params={"employee_id": emp})
+        resp = client.get(
+            "/hours/baseline", params={"employee_id": emp},
+            headers=_employee_headers(emp, monkeypatch),
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["employee_id"] == emp
@@ -190,13 +204,16 @@ def test_baseline_endpoint_returns_normal_window():
         db.close()
 
 
-def test_baseline_endpoint_no_data_returns_nulls():
+def test_baseline_endpoint_no_data_returns_nulls(monkeypatch):
     emp = f"{A5}e_empty"
     db = SessionLocal()
     try:
         _cleanup(db)
         client = _make_client()
-        resp = client.get("/hours/baseline", params={"employee_id": emp})
+        resp = client.get(
+            "/hours/baseline", params={"employee_id": emp},
+            headers=_employee_headers(emp, monkeypatch),
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["normal_start"] is None
@@ -207,7 +224,7 @@ def test_baseline_endpoint_no_data_returns_nulls():
         db.close()
 
 
-def test_anomaly_endpoint_flags_after_hours_and_high_z():
+def test_anomaly_endpoint_flags_after_hours_and_high_z(monkeypatch):
     emp = f"{A5}e_anom"
     db = SessionLocal()
     try:
@@ -228,7 +245,10 @@ def test_anomaly_endpoint_flags_after_hours_and_high_z():
         expected_minutes = 15.0 * len(counted)
         assert counted, "at least the 22:00 row must fall inside the 24h window"
         client = _make_client()
-        resp = client.get("/hours/anomaly", params={"employee_id": emp})
+        resp = client.get(
+            "/hours/anomaly", params={"employee_id": emp},
+            headers=_employee_headers(emp, monkeypatch),
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["employee_id"] == emp
@@ -244,7 +264,7 @@ def test_anomaly_endpoint_flags_after_hours_and_high_z():
         db.close()
 
 
-def test_anomaly_endpoint_quiet_day_scores_low():
+def test_anomaly_endpoint_quiet_day_scores_low(monkeypatch):
     emp = f"{A5}e_quiet"
     db = SessionLocal()
     try:
@@ -255,7 +275,10 @@ def test_anomaly_endpoint_quiet_day_scores_low():
         _add_row(db, emp, midday, 60)
         db.commit()
         client = _make_client()
-        resp = client.get("/hours/anomaly", params={"employee_id": emp})
+        resp = client.get(
+            "/hours/anomaly", params={"employee_id": emp},
+            headers=_employee_headers(emp, monkeypatch),
+        )
         assert resp.status_code == 200
         body = resp.json()
         assert body["after_hours_activity"] is False

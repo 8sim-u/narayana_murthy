@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,15 +11,33 @@ class EventCreate(BaseModel):
     confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence score between 0.0 and 1.0")
     zone: str = Field(default="UNKNOWN", description="Monitoring zone identifier")
     # Edge roadmap fields (all optional for backward compatibility).
+    privacy_mode: bool = Field(
+        default=False,
+        description="Explicit aggregate-only request marker; such events never enter person-event storage",
+    )
     person_name: Optional[str] = Field(default=None, description="Recognized person name, or 'unknown'")
     person_name_confidence: Optional[float] = Field(
         default=None, ge=0.0, le=1.0,
         description="Confidence of the person identification (0.0-1.0); null when the vision node did not report one",
     )
-    position_x: Optional[float] = Field(default=None, description="Normalized x position in frame (0.0-1.0)")
-    position_y: Optional[float] = Field(default=None, description="Normalized y position in frame (0.0-1.0)")
+    position_x: Optional[float] = Field(default=None, description="Room-map x coordinate; normalized by position_bounds when supplied")
+    position_y: Optional[float] = Field(default=None, description="Room-map y coordinate; normalized by position_bounds when supplied")
+    position_bounds: Optional[List[float]] = Field(
+        default=None,
+        description="Optional [width, height] for calibrated room coordinates; omitted values are treated as normalized",
+    )
     snapshot_path: Optional[str] = Field(default=None, description="Snapshot file path relative to data/, e.g. snapshots/Person_1_20261102_120501.jpg")
     dwell_seconds: Optional[float] = Field(default=None, ge=0.0, description="Time the tracked person has been in frame")
+
+
+class AggregateOccupancyCreate(BaseModel):
+    """Strict aggregate-only payload. Extra identity-like fields are rejected."""
+
+    camera_id: str = Field(..., min_length=1, max_length=64)
+    occupancy: Literal["occupied", "vacant"]
+    person_count: int = Field(..., ge=0, le=1000)
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class EventResponse(BaseModel):

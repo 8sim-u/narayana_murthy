@@ -1,0 +1,4 @@
+# Build-only dependencies for agent/build_exe.ps1.
+PyInstaller>=6.6,<7
+pystray>=0.19,<0.20
+Pillow>=10,<13

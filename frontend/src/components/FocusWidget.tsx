@@ -344,6 +344,17 @@ export default function FocusWidget({ officeId = "" }: { officeId?: string }) {
                   ))}
                 </div>
               )}
+              {/* Break reminders are quiet: an inline status line, never a
+                  blocking modal, and it never steals focus. */}
+              {!daily.break_compliance.compliant && (
+                <div className="notice notice-info" role="status" style={{ marginTop: 16, marginBottom: 0 }}>
+                  <p>
+                    Break reminder: {daily.break_compliance.taken_breaks} of{' '}
+                    {daily.break_compliance.required_breaks} breaks taken today. A short
+                    pause counts and nothing is blocked while you finish your task.
+                  </p>
+                </div>
+              )}
             </section>
           </Reveal>
 

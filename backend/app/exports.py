@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.activity import strain_level
 from app.activity_models import ActivityLog
 from app.database import get_db
+from app.employee_auth import ensure_employee_match, require_employee
 from app.focus import daily_focus
 from app.models import DetectionEvent
 
@@ -99,7 +100,9 @@ def export_events_csv(
     end_time: Optional[datetime] = Query(None, description="Filter events before or at this UTC datetime"),
     db: Session = Depends(get_db),
 ):
-    """CSV export of detection events, honoring the same filters as GET /events."""
+    """Operational CSV export of the event feed; same auth as GET /events
+    (deployment API key when configured, not an employee token). Legacy rows
+    with NULL employee_id are included, matching the JSON feed."""
     try:
         query = db.query(DetectionEvent)
         if camera_id is not None:
@@ -160,8 +163,11 @@ def export_activity_csv(
     limit: int = Query(1000, ge=1, le=EXPORT_LIMIT, description="Maximum number of records to export"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """CSV export of activity records, honoring the same filters as GET /activity."""
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     try:
         query = db.query(ActivityLog)
         if machine_id is not None:
@@ -228,6 +234,7 @@ def export_focus_csv(
         None, description="Last date of the range (YYYY-MM-DD); defaults to today"
     ),
     db: Session = Depends(get_db),
+    authenticated_employee_id: str = Depends(require_employee),
 ):
     """
     CSV export of daily focus scores for one employee over a date range.
@@ -235,6 +242,8 @@ def export_focus_csv(
     (default: the last 7 days ending today) so the export contains a full week.
     Scores are computed with the same app.focus.daily_focus logic as /focus/daily.
     """
+    ensure_employee_match(employee_id, authenticated_employee_id)
+    employee_id = authenticated_employee_id
     end = end_date or date.today()
     start = start_date or (end - timedelta(days=6))
     if start > end:

@@ -138,16 +138,55 @@ bash deploy/install-agent.sh --server-url http://192.0.2.10:8000 \
     --machine-id workstation-042 --employee-id employee-042 --office-id hq
 ```
 
-Windows workstation (run PowerShell **as administrator**):
+Windows workstation: sign in to the intended employee's console account, then
+run PowerShell **as administrator**. The installer confirms that account is the
+active console user and binds the collector task to it with an interactive,
+limited principal.
 
 ```powershell
 .\deploy\install-agent.ps1
 ```
 
 This copies the agent sources, builds a venv, installs
-`agent/requirements.txt`, writes `config.env`, and registers the hidden
-at-logon scheduled task "WAMSS Activity Agent" (runs `pythonw.exe`, so no
-console window appears).
+`agent/requirements.txt`, and writes only nonsecret settings to `config.env`.
+It prompts for the assigned employee's personal token with input hidden and
+stores only machine-scope DPAPI ciphertext in a separate directory. The
+protected token file grants read access only to the intended Windows account
+and, when selected, the verified service SID; the deployment-wide API key is
+not distributed to this workstation. The hidden at-logon scheduled task
+"WAMSS Activity Agent" runs `pythonw.exe` as that explicit user with limited
+privileges.
+
+For ordered spool uploads from a boot-start Windows service, use
+`.\deploy\install-agent.ps1 -UseWindowsService` instead. The signed-in
+task still handles the consent prompt and desktop collection; the service
+is explicitly configured as LocalSystem with its per-service SID enabled, and
+the secret ACL grants read access to that SID rather than to a broad service
+group. In this mode, the installer precreates the identity-specific spool and
+queue files: the task user can append activity and take the spool lock, but
+cannot create, replace, or delete spool entries; the service SID can rotate and
+upload the queue. The installer verifies and records the Windows account SID as well as
+its name; the collector and service fail closed if the current account SID does
+not match. It rejects reparse points in the protected install path and refuses
+to overwrite an existing installation; use `-Uninstall` first to reinstall or
+reassign an employee. The service refuses to sync unless the active console
+account matches the configured employee account and its consent marker. The
+installer disables collector-side uploads in this mode to avoid two processes
+sending the same spool. LocalSystem and local administrators remain privileged machine actors
+and can ultimately take ownership or inspect process memory. To withdraw
+workstation consent after installation, the employee can run
+`python consent.py --withdraw` from the installed agent folder in their signed-in
+session and confirm the prompt. Collection stops at the next interval and the
+service pauses uploads; queued records remain local until fresh consent. Do not
+use workstation consent as a substitute for separate camera-specific consent.
+
+The optional single-file tray monitor can be built on Windows with
+`.\agent\build_exe.ps1`; see `agent/README.md` for its nonsecret `config.env`
+and AtLogOn setup. On first run it requests the employee token in a masked
+dialog and stores it as DPAPI ciphertext in that user's LocalAppData with a
+user-only ACL. It does not store the deployment-wide key. The tray monitor posts
+directly and does not spool offline data, so use the full agent when durable
+network-outage buffering is required.
 
 After installing on each workstation:
 
@@ -169,8 +208,8 @@ bash deploy/install-agent.sh --uninstall
 
 ## Step 5: Pair the smartwatch (optional)
 
-The heart-rate module is optional; without it the agent keeps working with
-heuristic-only strain scoring.
+Wearable wellness is optional. Activity scoring is always work-pattern-only;
+turning off BLE does not change the activity strain calculation.
 
 - Windows: Settings > Bluetooth and devices > Add device. Pair the watch or
   chest strap, then set `WAMSS_BLE_DEVICE` to part of its device name in the
@@ -180,10 +219,16 @@ heuristic-only strain scoring.
   `connect <MAC>`. Set `WAMSS_BLE_DEVICE` to the MAC or a name substring.
 
 If `WAMSS_BLE_DEVICE` is empty, the agent connects to the first device
-advertising the standard Heart Rate service (0x180D). Heart rate only nudges
-the strain heuristic (BPM above `WAMSS_STRAIN_HR_RESTING`, default 90, adds up
-to 10 strain points); it is not a medical measure. See `agent/README.md` for
-the full BLE section.
+advertising the standard Heart Rate service (0x180D). Wearable collection is
+off by default and requires the employee's separate local wellness consent,
+individual token, and dashboard consent. Live heart rate and derived RMSSD are
+sent only to the employee's private wellness view; they are never blended into
+workstation strain scores or work-pattern activity alerts. A daily HRV trend
+can contribute to a generic manager check-in only after a separate employee
+opt-in and only for a manager with a server-authorized roster; no raw value or
+trend is exposed. Configure manager token hashes and rosters only through
+protected backend settings. See `docs/WELLNESS_PRIVACY.md` and `agent/README.md`
+for the privacy boundary and pairing steps.
 
 ## Step 6: Configure cameras and zones
 
@@ -201,10 +246,24 @@ Vision events carry `camera_id` and `zone`. Two things to configure:
    `zone` set to `RESTRICTED` (case-insensitive). Name the camera zones in
    your vision pipeline accordingly.
 
-How to pass these to the container: the compose file only forwards
-`DATABASE_URL` and `WAMSS_API_KEY` by default. Add any extra backend variables
-(like `WAMSS_ZONE_MAP`) to your `.env`, then add one line to the `backend`
-service in `docker-compose.yml`:
+The compose file passes `WAMSS_ATTENDANCE_ENABLED` (default `0`), the app-map
+path, and attendance confidence/dwell limits from `.env`; it mounts the
+category map and camera-name identity map read-only from `backend/app/`. Edit
+those JSON files on the host. The default category map can classify known
+process names as `work`, `break`, or `neutral`; every unlisted app is neutral.
+
+Daily attendance is explicitly opt-in. Only recognized enrolled camera
+identities above the configured confidence threshold and non-idle workstation
+segments are included. Configure `backend/app/attendance_identity_map.json`
+when a recognized camera name differs from the workstation employee ID. Give
+the required employee notice and obtain any separate camera-recognition
+consent before enabling it. The API and dashboard use UTC calendar days, show
+camera/computer sources, and the weekly PDF includes the same daily totals.
+See `agent/README.md` for the estimation rules and privacy details.
+
+For other custom backend variables (for example `WAMSS_ZONE_MAP`), add the
+variable to `.env` and pass it through the `backend` service in
+`docker-compose.yml`:
 
 ```yaml
     env_file:
@@ -347,12 +406,13 @@ container picks up the current compose file. (Only a `VITE_API_URL` build-arg
 override makes the browser call the backend directly; that URL must be
 browser-reachable, and key auth will 401 without a proxy.)
 
-**Agent installs but nothing syncs.** Check the spool file for fresh records
-(`spool/pending.jsonl` in the install dir). If records spool but never
-upload, the server URL is wrong or unreachable from the workstation, or the
-API key is missing/mismatched when auth is enabled. If the spool stays empty,
-check the consent marker: the agent does nothing until consent is recorded
-(graphical dialog on Windows, typed `YES` on Linux console).
+**Agent installs but nothing syncs.** Check the identity-specific spool file
+under `spool/` in the install dir. If records spool but never upload, check the
+server URL/network connection and verify that the backend has the matching
+employee-token hash configured; Windows workstations do not receive the
+deployment-wide API key. If the spool stays empty, check the consent marker:
+the agent does nothing until consent is recorded (graphical dialog on Windows,
+typed `YES` on Linux console).
 
 **`docker compose` says "unknown shorthand flag" or similar.** You have the
 old standalone `docker-compose` (v1) rather than the Compose plugin (v2).

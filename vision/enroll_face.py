@@ -1,96 +1,74 @@
 #!/usr/bin/env python3
-"""Enroll a face into the WAMSS vision gallery.
+"""Submit a face enrollment to the backend's per-camera consent gate.
 
 Usage:
-    python enroll_face.py --photo /path/to/photo.jpg --name "Full Name"
+    python vision/enroll_face.py --photo /path/to/photo.jpg \
+        --name "Full Name" --camera-id CAM_01
 
-Detects the largest face in the photo, computes its embedding with the
-same backend that face_id.py uses at runtime (insightface when available,
-otherwise the OpenCV LBPH fallback), and saves it to
-vision/faces/<sanitized_name>.json.
-
-Run from the vision/ directory, or from the repo root as
-`python vision/enroll_face.py`. Restart the vision pipeline afterwards so
-the new face takes effect.
-
-Face recognition never runs in privacy mode; enrollment is a non-privacy
-operation by design.
+This client never computes or stores a local face embedding. The backend
+accepts the image only when the employee has active, explicit consent for the
+specified identity-mode camera.
 """
 
 import argparse
-import json
 import os
-import re
 import sys
-import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-try:
-    import cv2
-except ImportError:
-    cv2 = None
-
-import face_id
+import requests
 
 
-def sanitize_name(name):
-    """Make a filesystem-safe gallery filename stem from a display name."""
-    safe = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
-    return safe or "unnamed"
+def _backend_base(value):
+    raw = (value or "http://localhost:8000").strip().rstrip("/")
+    if raw.endswith("/event"):
+        raw = raw[:-len("/event")]
+    return raw
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Enroll a face into the WAMSS vision gallery.")
+        description="Enroll a face through the consent-gated backend API.")
     parser.add_argument("--photo", required=True,
-                        help="Path to a photo containing the person's face")
+                        help="Path to an authorized photo containing the employee's face")
     parser.add_argument("--name", required=True,
-                        help='Full name, e.g. "Jane Doe"')
+                        help="Employee display name configured in the identity map")
+    parser.add_argument("--camera-id", required=True,
+                        help="Camera ID for which active identity consent is recorded")
+    parser.add_argument("--backend-url", default=os.environ.get("WAMSS_BACKEND_URL", ""),
+                        help="Backend base URL or /event URL; defaults to WAMSS_BACKEND_URL")
     args = parser.parse_args()
 
-    if cv2 is None:
-        print("FAILED: OpenCV is not installed, cannot read the photo.")
-        return 1
     if not os.path.isfile(args.photo):
         print(f"FAILED: photo not found: {args.photo}")
         return 1
-    image = cv2.imread(args.photo)
-    if image is None:
-        print(f"FAILED: could not decode image: {args.photo}")
+
+    headers = {}
+    api_key = os.environ.get("WAMSS_API_KEY", "").strip()
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    try:
+        with open(args.photo, "rb") as photo:
+            response = requests.post(
+                _backend_base(args.backend_url) + "/faces/enroll",
+                data={"name": args.name, "camera_id": args.camera_id},
+                files={"photo": (os.path.basename(args.photo), photo, "image/jpeg")},
+                headers=headers,
+                timeout=30.0,
+            )
+        response.raise_for_status()
+        result = response.json()
+    except requests.RequestException as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 403:
+            print("FAILED: active employee consent for this identity camera is required.")
+        else:
+            print(f"FAILED: backend enrollment request failed ({type(exc).__name__}).")
+        return 1
+    except (OSError, ValueError) as exc:
+        print(f"FAILED: could not submit enrollment ({type(exc).__name__}).")
         return 1
 
-    backend = face_id.backend_name()
-    if backend == "none":
-        print("FAILED: no face-recognition backend is available. Install "
-              "insightface, or opencv-contrib-python for the LBPH fallback.")
-        return 1
-
-    result = face_id.extract_embedding(image)
-    if result is None:
-        print("FAILED: no face detected in the photo. Use a clear, "
-              "front-facing photo and try again.")
-        return 1
-    method, embedding = result
-
-    os.makedirs(face_id.GALLERY_DIR, exist_ok=True)
-    filename = sanitize_name(args.name) + ".json"
-    path = os.path.join(face_id.GALLERY_DIR, filename)
-    existed = os.path.isfile(path)
-    entry = {
-        "name": args.name.strip(),
-        "method": method,
-        "embedding": embedding,
-        "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(entry, fh)
-    face_id.reload_gallery()
-
-    action = "Updated" if existed else "Enrolled"
-    print(f"OK: {action} '{entry['name']}' -> {path} "
-          f"(backend: {method}). Restart the vision pipeline for the new "
-          f"face to take effect.")
+    print(f"OK: {result.get('status', 'submitted')} enrollment for camera {args.camera_id}.")
     return 0
 
 

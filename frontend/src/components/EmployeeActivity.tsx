@@ -36,12 +36,19 @@ interface StrainSummary {
   ml_stress_score?: number | null;
 }
 
-const STRAIN_COLORS: Record<string, string> = {
-  green: "var(--ok)",
-  amber: "var(--warn)",
-  red: "var(--bad)",
-  unknown: "var(--text-3)",
-};
+interface AppUsageItem {
+  employee_id: string;
+  machine_id: string;
+  app_name: string;
+  category: "work" | "break" | "neutral";
+  minutes: number;
+}
+
+interface FocusDaily {
+  employee_id: string;
+  date: string;
+  focus_score: number;
+}
 
 const EVENT_TONE: Record<string, "signal" | "bad" | "warn" | "iris" | "idle"> = {
   activity: "signal",
@@ -54,16 +61,31 @@ function eventTone(type: string) {
   return EVENT_TONE[type] ?? "idle";
 }
 
+function focusColor(score: number): string {
+  if (score >= 70) return "var(--ok)";
+  if (score >= 40) return "var(--warn)";
+  return "var(--bad)";
+}
+
 function minutesBetween(start: string, end: string): number {
   const ms = new Date(end).getTime() - new Date(start).getTime();
   return Math.max(0, ms / 60000);
 }
 
+function formatClock(iso: string | null): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+}
+
 export default function EmployeeActivity({ officeId = "" }: { officeId?: string }) {
   const [records, setRecords] = useState<ActivityRecord[]>([]);
   const [strain, setStrain] = useState<StrainSummary[]>([]);
+  const [appUsage, setAppUsage] = useState<AppUsageItem[]>([]);
+  const [focus, setFocus] = useState<FocusDaily | null>(null);
   const [employeeId, setEmployeeId] = useState("");
   const [machineId, setMachineId] = useState("");
+  const [appUsageDay, setAppUsageDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [idleThresholdMin, setIdleThresholdMin] = useState(15);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -77,14 +99,36 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
       if (machineId) params.set("machine_id", machineId);
       if (officeId) params.set("office_id", officeId);
       params.set("limit", "500");
-      const [actRes, strainRes] = await Promise.all([
+      const usageParams = new URLSearchParams(params);
+      usageParams.set("day", appUsageDay);
+      const [actRes, strainRes, usageRes] = await Promise.all([
         fetch(`${API_URL}/activity?${params.toString()}`),
         fetch(`${API_URL}/activity/strain-summary`),
+        fetch(`${API_URL}/activity/app-usage?${usageParams.toString()}`),
       ]);
       if (!actRes.ok) throw new Error(`activity: HTTP ${actRes.status}`);
       if (!strainRes.ok) throw new Error(`strain-summary: HTTP ${strainRes.status}`);
-      setRecords(await actRes.json());
+      if (!usageRes.ok) throw new Error(`app-usage: HTTP ${usageRes.status}`);
+      const data = (await actRes.json()) as ActivityRecord[];
+      setRecords(data);
       setStrain(await strainRes.json());
+      setAppUsage(await usageRes.json());
+      // The focus score belongs to a person, so it is fetched for the person
+      // these records belong to: the explicit filter, or the employee the
+      // returned activity rows carry. No score without that person.
+      const focusFor = employeeId || (data.length > 0 ? data[0].employee_id : "");
+      if (focusFor) {
+        const focusParams = new URLSearchParams({ employee_id: focusFor });
+        if (officeId) focusParams.set("office_id", officeId);
+        try {
+          const focusRes = await fetch(`${API_URL}/focus/daily?${focusParams.toString()}`);
+          setFocus(focusRes.ok ? ((await focusRes.json()) as FocusDaily) : null);
+        } catch {
+          setFocus(null);
+        }
+      } else {
+        setFocus(null);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load activity data");
     } finally {
@@ -97,24 +141,31 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
     const t = setInterval(() => { void fetchData(); }, 60000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [officeId]);
+  }, [officeId, employeeId, machineId, appUsageDay]);
 
   const activityRows = useMemo(
     () => records.filter((r) => r.event_type === "activity"),
     [records]
   );
 
-  const appUsage = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const r of activityRows) {
-      if (r.is_idle) continue;
-      const name = r.app_name || "(unknown)";
-      map.set(name, (map.get(name) || 0) + minutesBetween(r.start_time, r.end_time));
+  // The strain summary can repeat a machine/employee pair as new samples
+  // arrive. Keep only the newest sample per pair so the table shows one
+  // honest row per machine.
+  const latestStrain = useMemo(() => {
+    const latest = new Map<string, StrainSummary>();
+    for (const s of strain) {
+      const key = `${s.machine_id}/${s.employee_id}`;
+      const prev = latest.get(key);
+      if (!prev || (s.last_seen ?? "") > (prev.last_seen ?? "")) {
+        latest.set(key, s);
+      }
     }
-    return [...map.entries()].sort((a, b) => b[1] - a[1]);
-  }, [activityRows]);
+    return [...latest.values()].sort((a, b) =>
+      `${a.employee_id}${a.machine_id}`.localeCompare(`${b.employee_id}${b.machine_id}`),
+    );
+  }, [strain]);
 
-  const maxAppMin = appUsage.length > 0 ? appUsage[0][1] : 1;
+  const maxAppMin = appUsage.length > 0 ? Math.max(...appUsage.map((item) => item.minutes)) : 1;
 
   const idleStats = useMemo(() => {
     let idleMin = 0;
@@ -129,12 +180,13 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
 
   const idleAlerts = useMemo(() => {
     const now = Date.now();
-    return strain.filter((s) => {
+    // Uses the deduped per-machine list so a machine is named once.
+    return latestStrain.filter((s) => {
       if (!s.is_idle || !s.last_seen) return false;
       const idleMin = (now - new Date(s.last_seen).getTime()) / 60000;
       return idleMin >= idleThresholdMin;
     });
-  }, [strain, idleThresholdMin]);
+  }, [latestStrain, idleThresholdMin]);
 
   const alerts = useMemo(
     () =>
@@ -150,7 +202,7 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
     <div className="rise">
       <section className="panel" aria-label="Activity filters">
         <div className="section-head">
-          <h2 className="section-title">Telemetry Filters</h2>
+          <h2 className="section-title">Filters</h2>
           <div className="form-row" style={{ marginLeft: "auto" }}>
             <ExportButton
               endpoint="/exports/activity.csv"
@@ -186,9 +238,9 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
           </Field>
         </div>
         <p style={{ color: "var(--text-2)", fontSize: 13, margin: "14px 0 0", maxWidth: "80ch" }}>
-          Strain level is a heuristic workload signal (green &lt; 40, amber 40-69, red &ge; 70).
-          It is not a medical measure. ML stress is an experimental model score shown when the
-          backend provides it.
+          Input counts only. The workstation agent never captures keystroke or file
+          content, so no content can appear here. Strain level is a heuristic workload
+          signal (green under 40, amber 40 to 69, red 70 and up), not a medical measure.
         </p>
       </section>
 
@@ -210,73 +262,82 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
 
       <Reveal>
         <section className="panel" aria-label="Strain per Machine">
-          <SectionHead title="Strain per Machine" meta={`${strain.length} machines`} />
-          {loading && strain.length === 0 ? (
+          <SectionHead title="Strain per Machine" meta={`${latestStrain.length} machines`} />
+          {loading && latestStrain.length === 0 ? (
             <SkeletonRows rows={3} height={56} />
-          ) : strain.length === 0 ? (
+          ) : latestStrain.length === 0 ? (
             <EmptyState title="No strain data" body="Strain summaries appear here once workstation agents start reporting." />
           ) : (
-            <ul className="spec-list">
-              {strain.map((s, i) => {
-                const color = STRAIN_COLORS[(s.strain_level || "unknown").toLowerCase()] ?? "var(--text-3)";
-                return (
-                  <li key={`${s.machine_id}/${s.employee_id}`} className="rise-stagger" style={{ "--i": Math.min(i, 12) } as React.CSSProperties}>
-                    <span className="spec-term" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <Dot tone={strainDot(s.strain_level)} />
-                      <span className="id" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>
-                        {s.employee_id}@{s.machine_id}
-                      </span>
-                    </span>
-                    <span style={{ flex: 1, minWidth: 140 }}>
-                      <Meter value={s.strain_score ?? 0} color={color} label={`Strain ${s.strain_score ?? "unknown"}`} />
-                    </span>
-                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5, whiteSpace: "nowrap" }}>
-                      {s.strain_score ?? "-"} / {s.strain_level}
-                    </span>
-                    <Chip tone="iris">ML {s.ml_stress_score ?? "-"}</Chip>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="table-wrap">
+              <table className="ledger">
+                <thead>
+                  <tr>
+                    <th>Employee</th>
+                    <th>Machine</th>
+                    <th>Strain</th>
+                    <th>Level</th>
+                    <th>ML stress</th>
+                    <th>Last seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestStrain.map((s) => {
+                    const color =
+                      s.strain_level === "green" ? "var(--ok)"
+                        : s.strain_level === "amber" ? "var(--warn)"
+                          : s.strain_level === "red" ? "var(--bad)"
+                            : "var(--text-3)";
+                    return (
+                      <tr key={`${s.machine_id}/${s.employee_id}`}>
+                        <td className="id">{s.employee_id}</td>
+                        <td className="id">{s.machine_id}</td>
+                        <td>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+                            <Meter value={s.strain_score ?? 0} color={color} label={`Strain ${s.strain_score ?? "unknown"}`} />
+                            <span className="num">{s.strain_score ?? "-"}</span>
+                          </span>
+                        </td>
+                        <td><Chip tone={strainDot(s.strain_level)}>{s.strain_level || "unknown"}</Chip></td>
+                        <td className="num">{s.ml_stress_score ?? "-"}</td>
+                        <td className="num">{formatClock(s.last_seen)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
       </Reveal>
 
       <div className="grid-2">
         <Reveal>
-          <section className="panel" aria-label="App Usage">
-            <SectionHead title="App Usage" meta="active minutes" />
-            {loading && appUsage.length === 0 ? (
-              <SkeletonRows rows={4} height={40} />
-            ) : appUsage.length === 0 ? (
-              <EmptyState title="No active segments" body="App Usage builds up as agents report non-idle windows." />
-            ) : (
-              <ul className="spec-list">
-                {appUsage.slice(0, 8).map(([app, mins], i) => (
-                  <li key={app} className="rise-stagger" style={{ "--i": Math.min(i, 8) } as React.CSSProperties}>
-                    <span className="spec-term" style={{ minWidth: 150 }}>{app}</span>
-                    <span style={{ flex: 1, minWidth: 120 }}>
-                      <Meter value={mins} max={maxAppMin} color="var(--ice)" label={`${app} ${mins.toFixed(1)} minutes`} />
-                    </span>
-                    <span className="num" style={{ fontFamily: "var(--font-mono)", fontSize: 12.5 }}>{mins.toFixed(1)} min</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </Reveal>
-
-        <Reveal>
-          <section className="panel" aria-label="Idle stats">
-            <SectionHead title="Time Split" />
-            <div className="grid-2">
+          <section className="panel" aria-label="Time split and focus">
+            <SectionHead title="Time Split and Focus" meta={focus ? focus.employee_id : undefined} />
+            <div className="grid-3">
               <Stat label="Active" value={`${idleStats.activeMin.toFixed(0)} min`} mono />
-              <Stat label="Idle" value={`${idleStats.idleMin.toFixed(0)} min`} mono tone="var(--text-2)" />
+              <Stat label="Idle" value={`${idleStats.idleMin.toFixed(0)} min`} mono />
+              <div className="stat">
+                <div className="stat-value mono" style={{ color: focus ? focusColor(focus.focus_score) : undefined }}>
+                  {focus ? focus.focus_score : "-"}
+                </div>
+                <div className="stat-label">Focus today / 100</div>
+                <div className="stat-sub">{focus ? `scored on ${focus.date}` : "no focus row for this person"}</div>
+              </div>
             </div>
+            {focus && (
+              <div style={{ marginTop: 14 }}>
+                <Meter value={focus.focus_score} color={focusColor(focus.focus_score)} label={`Focus ${focus.focus_score} of 100`} />
+              </div>
+            )}
+            <p style={{ color: "var(--text-2)", fontSize: 13, margin: "14px 0 0", maxWidth: "80ch" }}>
+              Focus rewards 25-minute deep-work blocks and penalizes app switching,
+              fragmentation and idle time. The full breakdown lives on the Focus tab.
+            </p>
             {alerts.length > 0 && (
               <>
                 <hr className="divider" />
-                <h3 className="section-title" style={{ marginBottom: 10, fontSize: 15 }}>Break Reminders and Alerts</h3>
+                <h3 className="section-title" style={{ marginBottom: 10, fontSize: 15 }}>Break reminders and alerts</h3>
                 <ul className="spec-list">
                   {alerts.slice(0, 6).map((a) => (
                     <li key={a.id}>
@@ -291,11 +352,54 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
             )}
           </section>
         </Reveal>
+
+        <Reveal>
+          <section className="panel" aria-label="Daily App Usage">
+            <div className="section-head">
+              <SectionHead title="Daily App Usage" meta="UTC active minutes" />
+              <Field label="UTC date">
+                <input className="input" type="date" value={appUsageDay} onChange={(e) => setAppUsageDay(e.target.value)} />
+              </Field>
+            </div>
+            {loading && appUsage.length === 0 ? (
+              <SkeletonRows rows={4} height={40} />
+            ) : appUsage.length === 0 ? (
+              <EmptyState title="No active segments" body="Daily app totals appear after agents report non-idle windows. Unmapped apps are neutral." />
+            ) : (
+              <div className="table-wrap">
+                <table className="ledger">
+                  <thead>
+                    <tr>
+                      <th>App</th>
+                      <th>Category</th>
+                      <th>Active minutes</th>
+                      <th>Share</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {appUsage.map((item) => (
+                      <tr key={`${item.employee_id}/${item.machine_id}/${item.app_name}/${item.category}`}>
+                        <td>{item.app_name}</td>
+                        <td>
+                          <Chip tone={item.category === "work" ? "signal" : "idle"}>{item.category}</Chip>
+                        </td>
+                        <td className="num">{item.minutes.toFixed(1)}</td>
+                        <td style={{ minWidth: 120 }}>
+                          <Meter value={item.minutes} max={maxAppMin} color="var(--ice)" label={`${item.app_name} ${item.minutes.toFixed(1)} minutes`} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </Reveal>
       </div>
 
       <Reveal>
         <section className="panel" aria-label="Activity timeline">
-          <SectionHead title="Timeline" meta="latest first, 100 rows" />
+          <SectionHead title="Timeline" meta="latest first, 100 rows, one row per recorded segment" />
           {loading && timelineRows.length === 0 ? (
             <SkeletonRows rows={6} height={48} />
           ) : timelineRows.length === 0 ? (
@@ -311,7 +415,7 @@ export default function EmployeeActivity({ officeId = "" }: { officeId?: string 
                     <th>Machine</th>
                     <th>App</th>
                     <th>Window</th>
-                    <th>Keys</th>
+                    <th>Keys (count)</th>
                     <th>Clicks</th>
                     <th>Idle</th>
                     <th>Strain</th>
