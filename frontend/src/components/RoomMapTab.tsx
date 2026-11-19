@@ -490,7 +490,7 @@ export default function RoomMapTab() {
                 </span>
               )}
               <span style={{ marginLeft: 'auto' }}>
-                Positions and zones are normalized room coordinates from the backend.
+                Marker positions are a rough single-camera estimate from the detection box centre, not an exact floor position. Zones are normalized room coordinates.
               </span>
             </figcaption>
           </figure>
