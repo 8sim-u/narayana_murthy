@@ -804,6 +804,7 @@ tr.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
   .skel { animation: none; opacity: 0.7; }
   .loadbar > i { animation: none; width: 100%; transform: none; }
   .signal-dot::after { animation: none; opacity: 0.3; }
+  .live-badge::before { animation: none; opacity: 1; }
   .reveal { opacity: 1; transform: none; transition: none; }
   .tabnav-item::after { transition: none; }
   .station-card:hover { transform: none; }
@@ -883,3 +884,130 @@ tr.row-bad td:first-child { box-shadow: inset 3px 0 0 var(--bad); }
 .wellness-chart-line { stroke: var(--ice); stroke-width: 3; }
 .wellness-chart-point { fill: var(--ice); stroke: var(--paper); stroke-width: 2; }
 .wellness-chart-label { fill: var(--text-2); font-size: 10px; }
+
+/* ==========================================================================
+   Live video tab: the frame fills the panel, the header stays on one line.
+   (LiveVideo.tsx uses these classes; they previously had no rules, so the
+   badge, camera id and person name rendered unstyled.)
+   ========================================================================== */
+
+.live-video {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 20px 22px;
+}
+
+.live-video-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bad);
+  color: #fff;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  padding: 5px 11px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.live-badge::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fff;
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.live-camera {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.live-person {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.live-confidence {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--text-2);
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+.live-reload {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.live-reload:hover { border-color: var(--ink); background: var(--surface-raise); }
+.live-reload:active { transform: scale(0.98); }
+
+.live-frame {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 320px;
+  background: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.live-offline {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--cloud);
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-2);
+}
+
+.live-offline p { margin: 0 0 8px; }
+.live-offline p:last-child { margin-bottom: 0; }
+
+.live-note {
+  color: var(--text-2);
+  font-size: 13px;
+  margin: 12px 0 0;
+  max-width: 90ch;
+}
