@@ -858,7 +858,7 @@ def run_camera(camera_id, stream_url):
     # dashboard can show the live camera view. The streamer runs in
     # this process because only the pipeline may open the camera.
     video_streamer = None
-    if _video_stream is not None:
+    if _video_stream is not None and camera_id == "CAM_01":
         video_streamer = _video_stream.VideoStreamer(port=8002)
         video_streamer.start()
         print(f"[{camera_id}] Live video streamer on 127.0.0.1:8002")
