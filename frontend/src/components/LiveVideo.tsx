@@ -23,7 +23,9 @@ export default function LiveVideo({ streamUrl, cameraId, personName, confidence 
         <span className="live-camera">{cameraId}</span>
         <span className="live-person">
           {personName ? personName : "Unknown"}
-          {typeof confidence === "number" ? ` (${Math.round(confidence * 100)}%)` : ""}
+          {typeof confidence === "number" ? (
+            <span className="live-confidence">{Math.round(confidence * 100)}%</span>
+          ) : null}
         </span>
         <button type="button" onClick={reload} className="live-reload">
           Reload stream
