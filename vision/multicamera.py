@@ -203,6 +203,14 @@ except ImportError:
     except ImportError:
         _identity_cache = None
 
+try:
+    from . import video_stream as _video_stream
+except ImportError:
+    try:
+        import video_stream as _video_stream
+    except ImportError:
+        _video_stream = None
+
 # Retained for the legacy snapshot helper only. The active camera loop does
 # not save first-sighting person snapshots.
 SNAPSHOT_DIR = os.environ.get("WAMSS_SNAPSHOT_DIR", "data/snapshots").strip()
@@ -846,6 +854,15 @@ def run_camera(camera_id, stream_url):
 
     print(f"[{camera_id}] Camera connected (headless={HEADLESS})")
 
+    # Live video feed: serve the annotated frame as MJPEG so the
+    # dashboard can show the live camera view. The streamer runs in
+    # this process because only the pipeline may open the camera.
+    video_streamer = None
+    if _video_stream is not None and camera_id == "CAM_01":
+        video_streamer = _video_stream.VideoStreamer(port=8002)
+        video_streamer.start()
+        print(f"[{camera_id}] Live video streamer on 127.0.0.1:8002")
+
     try:
         while True:
             success, frame = cap.read()
@@ -992,6 +1009,11 @@ def run_camera(camera_id, stream_url):
                 print(f"[{camera_id}] Headless summary: {person_count} "
                       f"person(s) in view, max confidence {max_conf:.2f}")
                 last_summary_time = now
+
+            # Live video feed: hand the annotated frame (YOLO boxes
+            # drawn) to the MJPEG streamer every iteration.
+            if video_streamer is not None:
+                video_streamer.set_frame(results[0].plot())
 
             if HEADLESS:
                 # No display available: keep processing frames without any

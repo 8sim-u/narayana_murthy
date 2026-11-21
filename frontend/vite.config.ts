@@ -30,6 +30,14 @@ export default defineConfig({
         rewrite: (path) => path.replace(/^\/api/, ''),
         headers: devHeaders,
       },
+      '/video': {
+        target: 'http://localhost:8002',
+        changeOrigin: true,
+      },
+      '/snapshot.jpg': {
+        target: 'http://localhost:8002',
+        changeOrigin: true,
+      },
     },
   },
 })

@@ -19,11 +19,13 @@ import WellnessDashboard from './components/WellnessDashboard';
 import ManagerCheckins from './components/ManagerCheckins';
 import OfficeSelector from './components/OfficeSelector';
 import ExportButton from './components/ExportButton';
+import LiveVideo from './components/LiveVideo';
 
 const POLL_INTERVAL_MS = 5000;
 const POLL_LIMIT = 100;
 
 type Tab =
+  | 'livevideo'
   | 'events'
   | 'roommap'
   | 'identity'
@@ -40,6 +42,7 @@ type Tab =
 // Tab order follows DESIGN-DIRECTION.md: ordered by how often someone
 // uses them, one row, same header on every tab.
 const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
+  { id: 'livevideo', label: 'Live Video', kicker: 'Live camera', blurb: 'Live video from the camera, with YOLO boxes drawn by the pipeline.' },
   { id: 'events', label: 'Vision Events', kicker: 'Camera network', blurb: 'Detection feed from every camera zone, refreshed live.' },
   { id: 'roommap', label: 'Room Map', kicker: 'Live floor plan', blurb: 'Tracked persons, geofence zones and the occupancy timeline on one plan view.' },
   { id: 'identity', label: 'Identity', kicker: 'Face registry', blurb: 'Unknown sightings waiting for a name, and the known people list with confidence.' },
@@ -55,6 +58,7 @@ const TABS: { id: Tab; label: string; kicker: string; blurb: string }[] = [
 ];
 
 const PAGE_TITLES: Record<Tab, string> = {
+  livevideo: 'Live Video',
   events: 'Vision Events',
   roommap: 'Room Map',
   identity: 'Identity',
@@ -100,7 +104,7 @@ export default function App() {
   }, [cameraFilter]);
 
   useEffect(() => {
-    if (tab !== 'events') return;
+    if (tab !== 'events' && tab !== 'livevideo') return;
     setLoading(true);
     void loadEvents();
     const id = window.setInterval(loadEvents, POLL_INTERVAL_MS);
@@ -113,6 +117,15 @@ export default function App() {
       seen.add(e.camera_id);
     }
     return [...seen].sort();
+  }, [events]);
+
+  const latestNamed = useMemo(() => {
+    for (const e of events) {
+      if (e.person_name && e.person_name !== 'unknown') {
+        return e;
+      }
+    }
+    return null;
   }, [events]);
 
   const active = TABS.find((t) => t.id === tab)!;
@@ -173,6 +186,15 @@ export default function App() {
         </header>
 
         <div key={`body-${tab}`}>
+          {tab === 'livevideo' && (
+            <LiveVideo
+              streamUrl="/video"
+              cameraId="CAM_01"
+              personName={latestNamed?.person_name ?? null}
+              confidence={latestNamed?.person_name_confidence ?? null}
+            />
+          )}
+
           {tab === 'events' && (
             <>
               <section className="panel rise" aria-label="Vision events">
